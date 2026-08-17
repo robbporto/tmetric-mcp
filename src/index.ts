@@ -68,10 +68,58 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             task_url: {
               type: 'string',
-              description: 'Optional GitLab issue URL for integration',
+              description: 'Optional GitLab, GitHub or YouTrack issue URL for integration',
             },
           },
           required: ['project_id', 'task_name'],
+        },
+      },
+      {
+        name: 'create_time_entry',
+        description: 'Create a completed time entry for a past time range. Does not touch the running timer.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_id: {
+              type: 'number',
+              description: 'TMetric project ID',
+            },
+            task_name: {
+              type: 'string',
+              description: 'Name of the task (e.g., "Issue #123: Fix bug")',
+            },
+            start_time: {
+              type: 'string',
+              description: 'Start time as local ISO date-time without "Z" (e.g., "2024-01-15T09:00:00")',
+            },
+            end_time: {
+              type: 'string',
+              description: 'End time as local ISO date-time without "Z" (e.g., "2024-01-15T10:30:00")',
+            },
+            task_url: {
+              type: 'string',
+              description: 'Optional GitLab, GitHub or YouTrack issue URL for integration',
+            },
+          },
+          required: ['project_id', 'task_name', 'start_time', 'end_time'],
+        },
+      },
+      {
+        name: 'list_time_entries',
+        description: 'List time entries in a date range (inclusive), oldest first. Use this to find an entry ID before updating an entry.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            start_date: {
+              type: 'string',
+              description: 'First day of the range, YYYY-MM-DD',
+            },
+            end_date: {
+              type: 'string',
+              description: 'Last day of the range, YYYY-MM-DD',
+            },
+          },
+          required: ['start_date', 'end_date'],
         },
       },
       {
@@ -143,6 +191,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           task_name,
           task_url
         );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'create_time_entry': {
+        const { project_id, task_name, start_time, end_time, task_url } = args as {
+          project_id: number;
+          task_name: string;
+          start_time: string;
+          end_time: string;
+          task_url?: string;
+        };
+
+        const result = await tmetricClient.createTimeEntry(
+          project_id,
+          task_name,
+          start_time,
+          end_time,
+          task_url
+        );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'list_time_entries': {
+        const { start_date, end_date } = args as {
+          start_date: string;
+          end_date: string;
+        };
+
+        const result = await tmetricClient.listTimeEntries(start_date, end_date);
 
         return {
           content: [

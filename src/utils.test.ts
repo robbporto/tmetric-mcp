@@ -5,8 +5,10 @@ import {
   formatMinutesToGitLab,
   extractBaseUrl,
   extractIssueNumber,
+  extractYouTrackIssueId,
   formatIssueId,
   detectIntegrationType,
+  parseIssueUrl,
 } from './utils.js';
 
 describe('calculateElapsed', () => {
@@ -138,6 +140,53 @@ describe('detectIntegrationType', () => {
     const url = 'not-a-valid-url';
     expect(detectIntegrationType(url)).toBe('GitLab');
   });
+
+  it('should detect YouTrack cloud URLs by host', () => {
+    const url = 'https://example.youtrack.cloud/issue/ABC-123';
+    expect(detectIntegrationType(url)).toBe('YouTrack');
+  });
+
+  it('should detect self-hosted YouTrack by "youtrack" in host', () => {
+    const url = 'https://youtrack.example.com/issue/ABC-7';
+    expect(detectIntegrationType(url)).toBe('YouTrack');
+  });
+
+  it('should detect YouTrack by /issue/KEY path on custom domains', () => {
+    const url = 'https://tracker.example.com/issue/ABC-99';
+    expect(detectIntegrationType(url)).toBe('YouTrack');
+  });
+
+  it('should not treat GitLab /issues/ URLs as YouTrack', () => {
+    const url = 'https://gitlab.example.com/group/project/-/issues/123';
+    expect(detectIntegrationType(url)).toBe('GitLab');
+  });
+});
+
+describe('extractYouTrackIssueId', () => {
+  it('should extract issue key from YouTrack cloud URL', () => {
+    const url = 'https://example.youtrack.cloud/issue/ABC-123';
+    expect(extractYouTrackIssueId(url)).toBe('ABC-123');
+  });
+
+  it('should extract issue key with digits in project key', () => {
+    const url = 'https://example.youtrack.cloud/issue/PROJ2-45';
+    expect(extractYouTrackIssueId(url)).toBe('PROJ2-45');
+  });
+
+  it('should extract issue key from URL with query params', () => {
+    const url = 'https://example.youtrack.cloud/issue/ABC-123?focus=comments';
+    expect(extractYouTrackIssueId(url)).toBe('ABC-123');
+  });
+
+  it('should return null when no issue key present', () => {
+    const url = 'https://example.youtrack.cloud/dashboard';
+    expect(extractYouTrackIssueId(url)).toBeNull();
+  });
+
+  it('should return null for GitLab-style issue URLs', () => {
+    const url = 'https://gitlab.example.com/group/project/-/issues/123';
+    expect(extractYouTrackIssueId(url)).toBeNull();
+  });
 });
 
 describe('extractBaseUrl', () => {
@@ -258,5 +307,49 @@ describe('formatIssueId', () => {
   it('should handle issue number as string', () => {
     const result = formatIssueId('0', 'GitLab');
     expect(result).toBe('GitLab Issue: #0');
+  });
+
+  it('should return the raw issue key for YouTrack', () => {
+    const result = formatIssueId('ABC-123', 'YouTrack');
+    expect(result).toBe('ABC-123');
+  });
+});
+
+describe('parseIssueUrl', () => {
+  it('should parse a GitLab issue URL', () => {
+    const url = 'https://gitlab.example.com/group/project/-/issues/123';
+    expect(parseIssueUrl(url)).toEqual({
+      integrationType: 'GitLab',
+      baseUrl: 'https://gitlab.example.com',
+      issueId: 'GitLab Issue: #123',
+    });
+  });
+
+  it('should parse a GitHub issue URL', () => {
+    const url = 'https://github.com/user/repo/issues/456';
+    expect(parseIssueUrl(url)).toEqual({
+      integrationType: 'GitHub',
+      baseUrl: 'https://github.com',
+      issueId: 'GitHub Issue: #456',
+    });
+  });
+
+  it('should parse a YouTrack issue URL', () => {
+    const url = 'https://example.youtrack.cloud/issue/ABC-123';
+    expect(parseIssueUrl(url)).toEqual({
+      integrationType: 'YouTrack',
+      baseUrl: 'https://example.youtrack.cloud',
+      issueId: 'ABC-123',
+    });
+  });
+
+  it('should return null for a URL without an issue reference', () => {
+    const url = 'https://gitlab.com/user/repo';
+    expect(parseIssueUrl(url)).toBeNull();
+  });
+
+  it('should return null for a YouTrack host URL without an issue key', () => {
+    const url = 'https://example.youtrack.cloud/dashboard';
+    expect(parseIssueUrl(url)).toBeNull();
   });
 });

@@ -45,15 +45,23 @@ export function formatMinutesToGitLab(minutes: number): string {
   return `${mins}m`;
 }
 
+export type IntegrationType = 'GitHub' | 'GitLab' | 'YouTrack';
+
+// Matches YouTrack issue paths like /issue/ABC-123 (singular "issue", key-based id)
+const YOUTRACK_ISSUE_PATTERN = /\/issue\/([A-Za-z][A-Za-z0-9_]*-\d+)/;
+
 /**
  * Detect integration type from issue URL
- * Returns 'GitHub' or 'GitLab'
+ * Returns 'GitHub', 'GitLab' or 'YouTrack'
  */
-export function detectIntegrationType(issueUrl: string): 'GitHub' | 'GitLab' {
+export function detectIntegrationType(issueUrl: string): IntegrationType {
   try {
     const url = new URL(issueUrl);
     if (url.host.includes('github.com')) {
       return 'GitHub';
+    }
+    if (url.host.includes('youtrack') || YOUTRACK_ISSUE_PATTERN.test(url.pathname)) {
+      return 'YouTrack';
     }
     return 'GitLab'; // Default to GitLab for all other hosts
   } catch {
@@ -88,8 +96,49 @@ export function extractIssueNumber(issueUrl: string): string | null {
 }
 
 /**
- * Format issue number for TMetric display
+ * Extract issue key from a YouTrack issue URL
+ * e.g., "https://example.youtrack.cloud/issue/ABC-123" -> "ABC-123"
  */
-export function formatIssueId(issueNumber: string, integrationType: 'GitHub' | 'GitLab'): string {
+export function extractYouTrackIssueId(issueUrl: string): string | null {
+  const match = issueUrl.match(YOUTRACK_ISSUE_PATTERN);
+  return match ? match[1] : null;
+}
+
+/**
+ * Format issue reference for TMetric display
+ * GitHub/GitLab use the issue number; YouTrack uses the issue key as-is
+ */
+export function formatIssueId(issueNumber: string, integrationType: IntegrationType): string {
+  if (integrationType === 'YouTrack') {
+    return issueNumber;
+  }
   return `${integrationType} Issue: #${issueNumber}`;
+}
+
+export interface ParsedIssueUrl {
+  integrationType: IntegrationType;
+  baseUrl: string;
+  issueId: string;
+}
+
+/**
+ * Parse an issue URL (GitHub, GitLab or YouTrack) into the fields TMetric needs.
+ * Returns null when the URL contains no recognizable issue reference.
+ */
+export function parseIssueUrl(issueUrl: string): ParsedIssueUrl | null {
+  const integrationType = detectIntegrationType(issueUrl);
+  const issueRef =
+    integrationType === 'YouTrack'
+      ? extractYouTrackIssueId(issueUrl)
+      : extractIssueNumber(issueUrl);
+
+  if (!issueRef) {
+    return null;
+  }
+
+  return {
+    integrationType,
+    baseUrl: extractBaseUrl(issueUrl),
+    issueId: formatIssueId(issueRef, integrationType),
+  };
 }

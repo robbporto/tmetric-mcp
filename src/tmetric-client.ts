@@ -10,10 +10,7 @@ import {
   calculateElapsed,
   calculateDurationMinutes,
   formatMinutesToGitLab,
-  extractBaseUrl,
-  extractIssueNumber,
-  formatIssueId,
-  detectIntegrationType
+  parseIssueUrl
 } from './utils.js';
 
 export class TMetricClient {
@@ -184,20 +181,18 @@ export class TMetricClient {
       // Build task object
       const task: any = { name: taskName };
 
-      // Add integration (GitLab or GitHub) if task URL provided
+      // Add integration (GitLab, GitHub or YouTrack) if task URL provided
       if (taskUrl) {
-        const issueNumber = extractIssueNumber(taskUrl);
-        const baseUrl = extractBaseUrl(taskUrl);
-        const integrationType = detectIntegrationType(taskUrl);
+        const parsed = parseIssueUrl(taskUrl);
 
-        if (issueNumber) {
+        if (parsed) {
           task.externalLink = {
             link: taskUrl,
-            issueId: formatIssueId(issueNumber, integrationType)
+            issueId: parsed.issueId
           };
           task.integration = {
-            url: baseUrl,
-            type: integrationType
+            url: parsed.baseUrl,
+            type: parsed.integrationType
           };
         }
       }
@@ -227,6 +222,90 @@ export class TMetricClient {
         success: false,
         error: 'API_ERROR',
         message: `Failed to start timer: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Create a completed time entry for a past time range.
+   * Times are local ISO strings without a trailing "Z" (matching TMetric's format).
+   */
+  async createTimeEntry(
+    projectId: number,
+    taskName: string,
+    startTime: string,
+    endTime: string,
+    taskUrl?: string
+  ): Promise<ApiResponse> {
+    try {
+      const start = new Date(startTime);
+      const end = new Date(endTime);
+
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        return {
+          success: false,
+          error: 'INVALID_TIME_FORMAT',
+          message: 'start_time and end_time must be ISO date-time strings (e.g. "2024-01-15T09:00:00")'
+        };
+      }
+
+      if (end.getTime() <= start.getTime()) {
+        return {
+          success: false,
+          error: 'INVALID_TIME_RANGE',
+          message: 'end_time must be after start_time'
+        };
+      }
+
+      await this.ensureInitialized();
+
+      // Build task object (same issue-URL handling as startTimer)
+      const task: any = { name: taskName };
+
+      if (taskUrl) {
+        const parsed = parseIssueUrl(taskUrl);
+
+        if (parsed) {
+          task.externalLink = {
+            link: taskUrl,
+            issueId: parsed.issueId
+          };
+          task.integration = {
+            url: parsed.baseUrl,
+            type: parsed.integrationType
+          };
+        }
+      }
+
+      const entryData = {
+        startTime,
+        endTime,
+        project: { id: projectId },
+        task,
+        tags: []
+      };
+
+      const response = await this.client.post<TMetricTimeEntry>(
+        `/accounts/${this.accountId}/timeentries`,
+        entryData
+      );
+
+      const durationMinutes = calculateDurationMinutes(startTime, endTime);
+
+      return {
+        success: true,
+        entry_id: response.data.id,
+        task_name: taskName,
+        started_at: startTime,
+        ended_at: endTime,
+        time_spent: formatMinutesToGitLab(durationMinutes),
+        time_spent_minutes: durationMinutes
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: 'API_ERROR',
+        message: `Failed to create time entry: ${error.message}`
       };
     }
   }
@@ -309,6 +388,73 @@ export class TMetricClient {
         success: false,
         error: 'API_ERROR',
         message: `Failed to stop timer: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * List time entries in a date range (inclusive), oldest first.
+   * Dates are YYYY-MM-DD strings.
+   */
+  async listTimeEntries(startDate: string, endDate: string): Promise<ApiResponse> {
+    try {
+      const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+      if (!DATE_PATTERN.test(startDate) || !DATE_PATTERN.test(endDate)) {
+        return {
+          success: false,
+          error: 'INVALID_DATE_FORMAT',
+          message: 'start_date and end_date must be YYYY-MM-DD strings'
+        };
+      }
+
+      if (endDate < startDate) {
+        return {
+          success: false,
+          error: 'INVALID_DATE_RANGE',
+          message: 'end_date must be the same as or after start_date'
+        };
+      }
+
+      await this.ensureInitialized();
+
+      const response = await this.client.get<TMetricTimeEntry[]>(
+        `/accounts/${this.accountId}/timeentries`,
+        {
+          params: {
+            startDate,
+            endDate
+          }
+        }
+      );
+
+      const entries = response.data
+        .slice()
+        .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
+        .map(entry => ({
+          id: entry.id,
+          task_name: entry.task?.name || entry.note || 'No description',
+          project_name: entry.project?.name || 'No project',
+          project_id: entry.project?.id,
+          start_time: entry.startTime,
+          end_time: entry.endTime,
+          is_running: entry.endTime === null,
+          duration_minutes: entry.endTime === null
+            ? null
+            : calculateDurationMinutes(entry.startTime, entry.endTime),
+          task_url: entry.task?.externalLink?.link,
+          tags: entry.tags || []
+        }));
+
+      return {
+        success: true,
+        entries
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: 'API_ERROR',
+        message: `Failed to list time entries: ${error.message}`
       };
     }
   }

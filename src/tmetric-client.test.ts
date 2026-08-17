@@ -355,6 +355,52 @@ describe('TMetricClient', () => {
       expect(result.timer_id).toBe('new-entry');
     });
 
+    it('should start a new timer with YouTrack URL', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, []);
+
+      const mockResponse: TMetricTimeEntry = {
+        id: 'new-entry',
+        startTime: '2024-01-15T12:00:00Z',
+        endTime: null,
+        project: { id: 123, name: 'Test Project' },
+        task: {
+          name: 'ABC-123 Fix the widget',
+          externalLink: {
+            link: 'https://example.youtrack.cloud/issue/ABC-123',
+            issueId: 'ABC-123',
+          },
+          integration: {
+            url: 'https://example.youtrack.cloud',
+            type: 'YouTrack',
+          },
+        },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`, (body) => {
+          expect(body.task.externalLink.link).toBe(
+            'https://example.youtrack.cloud/issue/ABC-123'
+          );
+          expect(body.task.externalLink.issueId).toBe('ABC-123');
+          expect(body.task.integration.url).toBe('https://example.youtrack.cloud');
+          expect(body.task.integration.type).toBe('YouTrack');
+          return true;
+        })
+        .reply(200, mockResponse);
+
+      const result = await client.startTimer(
+        123,
+        'ABC-123 Fix the widget',
+        'https://example.youtrack.cloud/issue/ABC-123'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.timer_id).toBe('new-entry');
+    });
+
     it('should fail when timer already running', async () => {
       const runningEntry: TMetricTimeEntry[] = [
         {
@@ -427,6 +473,122 @@ describe('TMetricClient', () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe('API_ERROR');
       expect(result.message).toContain('Failed to start timer');
+    });
+  });
+
+  describe('createTimeEntry', () => {
+    beforeEach(async () => {
+      nock(TMETRIC_BASE_URL)
+        .get('/api/v3/user')
+        .reply(200, { activeAccountId: ACCOUNT_ID });
+
+      await client.initialize();
+    });
+
+    it('should create a completed entry for a past time range', async () => {
+      const mockResponse: TMetricTimeEntry = {
+        id: 'past-entry',
+        startTime: '2024-01-15T09:00:00',
+        endTime: '2024-01-15T10:30:00',
+        project: { id: 123, name: 'Test Project' },
+        task: { name: 'Past Task' },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`, (body) => {
+          expect(body.startTime).toBe('2024-01-15T09:00:00');
+          expect(body.endTime).toBe('2024-01-15T10:30:00');
+          expect(body.project.id).toBe(123);
+          expect(body.task.name).toBe('Past Task');
+          expect(body.task.externalLink).toBeUndefined();
+          return true;
+        })
+        .reply(200, mockResponse);
+
+      const result = await client.createTimeEntry(
+        123,
+        'Past Task',
+        '2024-01-15T09:00:00',
+        '2024-01-15T10:30:00'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.entry_id).toBe('past-entry');
+      expect(result.task_name).toBe('Past Task');
+      expect(result.time_spent).toBe('1h30m');
+      expect(result.time_spent_minutes).toBe(90);
+    });
+
+    it('should attach issue link when task_url provided', async () => {
+      const mockResponse: TMetricTimeEntry = {
+        id: 'past-entry',
+        startTime: '2024-01-15T09:00:00',
+        endTime: '2024-01-15T10:00:00',
+        project: { id: 123, name: 'Test Project' },
+        task: { name: 'ABC-9 Past work' },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`, (body) => {
+          expect(body.task.externalLink.link).toBe(
+            'https://example.youtrack.cloud/issue/ABC-9'
+          );
+          expect(body.task.externalLink.issueId).toBe('ABC-9');
+          expect(body.task.integration.type).toBe('YouTrack');
+          return true;
+        })
+        .reply(200, mockResponse);
+
+      const result = await client.createTimeEntry(
+        123,
+        'ABC-9 Past work',
+        '2024-01-15T09:00:00',
+        '2024-01-15T10:00:00',
+        'https://example.youtrack.cloud/issue/ABC-9'
+      );
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject when end time is not after start time', async () => {
+      const result = await client.createTimeEntry(
+        123,
+        'Task',
+        '2024-01-15T10:00:00',
+        '2024-01-15T09:00:00'
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('INVALID_TIME_RANGE');
+    });
+
+    it('should reject unparseable times', async () => {
+      const result = await client.createTimeEntry(
+        123,
+        'Task',
+        'not-a-time',
+        '2024-01-15T10:00:00'
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('INVALID_TIME_FORMAT');
+    });
+
+    it('should handle API errors', async () => {
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .reply(400, { error: 'Bad request' });
+
+      const result = await client.createTimeEntry(
+        123,
+        'Task',
+        '2024-01-15T09:00:00',
+        '2024-01-15T10:00:00'
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('API_ERROR');
+      expect(result.message).toContain('Failed to create time entry');
     });
   });
 
@@ -566,6 +728,140 @@ describe('TMetricClient', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('API_ERROR');
+    });
+  });
+
+  describe('listTimeEntries', () => {
+    beforeEach(async () => {
+      nock(TMETRIC_BASE_URL)
+        .get('/api/v3/user')
+        .reply(200, { activeAccountId: ACCOUNT_ID });
+
+      await client.initialize();
+    });
+
+    it('should list entries for a date range', async () => {
+      const mockEntries: TMetricTimeEntry[] = [
+        {
+          id: 'entry-2',
+          startTime: '2024-01-12T14:00:00',
+          endTime: '2024-01-12T15:30:00',
+          project: { id: 456, name: 'Other Project' },
+          note: 'Note-only entry',
+          tags: ['Development'],
+        },
+        {
+          id: 'entry-1',
+          startTime: '2024-01-10T09:00:00',
+          endTime: '2024-01-10T10:00:00',
+          project: { id: 123, name: 'Test Project' },
+          task: {
+            name: 'ABC-5 Some work',
+            externalLink: {
+              link: 'https://example.youtrack.cloud/issue/ABC-5',
+              issueId: 'ABC-5',
+            },
+          },
+        },
+      ];
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-10', endDate: '2024-01-15' })
+        .reply(200, mockEntries);
+
+      const result = await client.listTimeEntries('2024-01-10', '2024-01-15');
+
+      expect(result.success).toBe(true);
+      expect(result.entries).toEqual([
+        {
+          id: 'entry-1',
+          task_name: 'ABC-5 Some work',
+          project_name: 'Test Project',
+          project_id: 123,
+          start_time: '2024-01-10T09:00:00',
+          end_time: '2024-01-10T10:00:00',
+          is_running: false,
+          duration_minutes: 60,
+          task_url: 'https://example.youtrack.cloud/issue/ABC-5',
+          tags: [],
+        },
+        {
+          id: 'entry-2',
+          task_name: 'Note-only entry',
+          project_name: 'Other Project',
+          project_id: 456,
+          start_time: '2024-01-12T14:00:00',
+          end_time: '2024-01-12T15:30:00',
+          is_running: false,
+          duration_minutes: 90,
+          task_url: undefined,
+          tags: ['Development'],
+        },
+      ]);
+    });
+
+    it('should mark a running entry and leave its duration unset', async () => {
+      const mockEntries: TMetricTimeEntry[] = [
+        {
+          id: 'running-entry',
+          startTime: '2024-01-15T11:00:00Z',
+          endTime: null,
+          project: { id: 123, name: 'Test Project' },
+          task: { name: 'Ongoing work' },
+        },
+      ];
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, mockEntries);
+
+      const result = await client.listTimeEntries('2024-01-15', '2024-01-15');
+
+      expect(result.success).toBe(true);
+      expect(result.entries[0].is_running).toBe(true);
+      expect(result.entries[0].end_time).toBeNull();
+      expect(result.entries[0].duration_minutes).toBeNull();
+    });
+
+    it('should return empty list when no entries in range', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-01', endDate: '2024-01-02' })
+        .reply(200, []);
+
+      const result = await client.listTimeEntries('2024-01-01', '2024-01-02');
+
+      expect(result.success).toBe(true);
+      expect(result.entries).toEqual([]);
+    });
+
+    it('should reject dates that are not YYYY-MM-DD', async () => {
+      const result = await client.listTimeEntries('15/01/2024', '2024-01-15');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('INVALID_DATE_FORMAT');
+    });
+
+    it('should reject when end date is before start date', async () => {
+      const result = await client.listTimeEntries('2024-01-15', '2024-01-10');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('INVALID_DATE_RANGE');
+    });
+
+    it('should handle API errors', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-10', endDate: '2024-01-15' })
+        .reply(500, { error: 'Server error' });
+
+      const result = await client.listTimeEntries('2024-01-10', '2024-01-15');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('API_ERROR');
+      expect(result.message).toContain('Failed to list time entries');
     });
   });
 
