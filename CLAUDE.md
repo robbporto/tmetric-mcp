@@ -16,7 +16,7 @@ CI (`.github/workflows/test.yml`) runs `npm ci`, `npm test`, `npm run build` on 
 
 ## Project Architecture
 
-Minimal Model Context Protocol (MCP) server that integrates TMetric time tracking with Claude Code and other MCP clients.
+Model Context Protocol (MCP) server that integrates TMetric time tracking with Claude Code and other MCP clients.
 
 ### File Structure
 
@@ -60,7 +60,7 @@ Minimal Model Context Protocol (MCP) server that integrates TMetric time trackin
 
 **Tags** are API objects (`{id, name, isWorkType}`), never plain strings. Tool inputs take tag *names*; `resolveTags()` matches them (case-insensitive) against `GET /accounts/{accountId}/timeentries/tags` and errors on unknown names (`UNKNOWN_TAG`) — no silent tag creation. At most one `isWorkType` tag per entry (`INVALID_TAGS`).
 
-**update_time_entry** has no single-entry GET to lean on (the API only defines PUT/DELETE on `/timeentries/{id}`), so it finds the entry by scanning a window of 31 days back to 7 days forward, then PUTs the full merged body (fetched values for anything not being changed).
+**update_time_entry** has no single-entry GET to lean on (the API only defines PUT/DELETE on `/timeentries/{id}`), so it finds the entry by scanning a window of 31 days back to 7 days forward — or exactly `entry_date` when given — then PUTs the full merged body (fetched values for anything not being changed, including a `note` carried alongside the task). User-supplied times must match `LOCAL_TIME_PATTERN` (local ISO, no `Z`/offset suffix) or they are rejected with `INVALID_TIME_FORMAT` — a `Z`-suffixed time would be stored at the wrong hour.
 
 **delete_time_entry modes** (see the design doc in `docs/plans/`): mode `'current'` (default) deletes only the running timer; mode `'last'` deletes today's most recent entry but refuses if it stopped more than 5 minutes ago. Deliberately no delete-by-ID — the design doc says specific-entry management belongs in the TMetric web UI. Error codes: `NO_TIMER_RUNNING`, `NO_ENTRIES_FOUND`, `ENTRY_TOO_OLD`, `API_ERROR`.
 

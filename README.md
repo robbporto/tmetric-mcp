@@ -1,6 +1,6 @@
 # TMetric MCP Server
 
-Minimal Model Context Protocol server for TMetric time tracking integration.
+Model Context Protocol server for TMetric time tracking integration.
 
 ## Features
 
@@ -146,10 +146,12 @@ List entries between two `YYYY-MM-DD` dates (inclusive), oldest first. Returns
 each entry's ID, task name, project, times, duration and tags. Use it to find
 an entry ID before updating.
 
-### update_time_entry(entry_id, task_name?, project_id?, start_time?, end_time?, task_url?, tags?)
+### update_time_entry(entry_id, task_name?, project_id?, start_time?, end_time?, task_url?, tags?, entry_date?)
 Change an existing entry. Fields you leave out keep their current values;
 `tags` replaces all tags on the entry (an empty array clears them). Entries are
-found within a window of 31 days back to 7 days forward from today.
+found within a window of 31 days back to 7 days forward from today — for
+anything older, pass `entry_date` (the entry's day, shown by
+`list_time_entries`).
 
 ### delete_time_entry(mode?)
 Delete a time entry. Mode `"current"` (default) deletes only the running

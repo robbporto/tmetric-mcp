@@ -100,7 +100,15 @@ export function extractIssueNumber(issueUrl: string): string | null {
  * e.g., "https://example.youtrack.cloud/issue/ABC-123" -> "ABC-123"
  */
 export function extractYouTrackIssueId(issueUrl: string): string | null {
-  const match = issueUrl.match(YOUTRACK_ISSUE_PATTERN);
+  // Match against the path only, so /issue/KEY-1 inside a query string
+  // doesn't count as a YouTrack issue
+  let target = issueUrl;
+  try {
+    target = new URL(issueUrl).pathname;
+  } catch {
+    // Not a full URL; match against the raw string
+  }
+  const match = target.match(YOUTRACK_ISSUE_PATTERN);
   return match ? match[1] : null;
 }
 

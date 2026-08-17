@@ -453,6 +453,40 @@ describe('TMetricClient', () => {
       expect(result.message).toContain('Development');
     });
 
+    it('should match tag names with stray spaces and collapse duplicates', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, []);
+
+      // Account tag stored with a trailing space
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, [{ id: 1, name: 'Development ', isWorkType: false }]);
+
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`, (body) => {
+          expect(body.tags).toHaveLength(1);
+          expect(body.tags[0].id).toBe(1);
+          return true;
+        })
+        .reply(200, {
+          id: 'new-entry',
+          startTime: '2024-01-15T12:00:00',
+          endTime: null,
+          project: { id: 123, name: 'Test Project' },
+          task: { name: 'Task' },
+        });
+
+      // Same tag twice with different casing resolves to one object
+      const result = await client.startTimer(123, 'Task', undefined, [
+        'development',
+        'Development',
+      ]);
+
+      expect(result.success).toBe(true);
+    });
+
     it('should fail when more than one work type tag is requested', async () => {
       nock(TMETRIC_BASE_URL)
         .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
@@ -496,16 +530,43 @@ describe('TMetricClient', () => {
         task: { name: 'New Task' },
       };
 
-      // Per the API spec, POST returns all entries for the affected days
+      // Per the API spec, POST returns all entries for the affected days.
+      // The new (running) entry is deliberately NOT last, so this fails if
+      // the matching logic is replaced with a positional guess.
       nock(TMETRIC_BASE_URL)
         .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
-        .reply(200, [earlierEntry, newEntry]);
+        .reply(200, [newEntry, earlierEntry]);
 
       const result = await client.startTimer(123, 'New Task');
 
       expect(result.success).toBe(true);
       expect(result.timer_id).toBe('new-entry');
       expect(result.started_at).toBe('2024-01-15T12:00:00');
+    });
+
+    it('should report when the started timer cannot be identified in the response', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, []);
+
+      // Array response with no running entry in it
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .reply(200, [
+          {
+            id: 'stopped-entry',
+            startTime: '2024-01-15T09:00:00',
+            endTime: '2024-01-15T10:00:00',
+            project: { id: 123, name: 'Test Project' },
+            task: { name: 'Other Task' },
+          },
+        ]);
+
+      const result = await client.startTimer(123, 'New Task');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('ENTRY_CREATED_BUT_NOT_IDENTIFIED');
     });
 
     it('should fail when timer already running', async () => {
@@ -741,6 +802,60 @@ describe('TMetricClient', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('INVALID_TIME_FORMAT');
+    });
+
+    it('should reject times with a Z suffix or timezone offset', async () => {
+      const withZ = await client.createTimeEntry(
+        123,
+        'Task',
+        '2024-01-15T09:00:00Z',
+        '2024-01-15T10:30:00'
+      );
+      expect(withZ.success).toBe(false);
+      expect(withZ.error).toBe('INVALID_TIME_FORMAT');
+
+      const withOffset = await client.createTimeEntry(
+        123,
+        'Task',
+        '2024-01-15T09:00:00',
+        '2024-01-15T10:30:00+02:00'
+      );
+      expect(withOffset.success).toBe(false);
+      expect(withOffset.error).toBe('INVALID_TIME_FORMAT');
+    });
+
+    it('should report when the created entry cannot be identified in the response', async () => {
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .reply(200, []);
+
+      const result = await client.createTimeEntry(
+        123,
+        'Task',
+        '2024-01-15T09:00:00',
+        '2024-01-15T10:00:00'
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('ENTRY_CREATED_BUT_NOT_IDENTIFIED');
+    });
+
+    it('should fail with UNKNOWN_TAG for a tag not in the account', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, [{ id: 1, name: 'Development', isWorkType: false }]);
+
+      const result = await client.createTimeEntry(
+        123,
+        'Task',
+        '2024-01-15T09:00:00',
+        '2024-01-15T10:00:00',
+        undefined,
+        ['Nonexistent']
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('UNKNOWN_TAG');
     });
 
     it('should handle API errors', async () => {
@@ -1194,6 +1309,182 @@ describe('TMetricClient', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('INVALID_TIME_FORMAT');
+    });
+
+    it('should reject times with a Z suffix or timezone offset', async () => {
+      const result = await client.updateTimeEntry('entry-42', {
+        startTime: '2024-01-10T08:00:00Z',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('INVALID_TIME_FORMAT');
+    });
+
+    it('should keep the note when the entry has both a task and a note', async () => {
+      const entryWithNote: TMetricTimeEntry = {
+        ...existingEntry,
+        note: 'Extra context',
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query(SEARCH_QUERY)
+        .reply(200, [entryWithNote]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-42`, (body) => {
+          expect(body.task.name).toBe('New name');
+          expect(body.note).toBe('Extra context');
+          return true;
+        })
+        .reply(200, entryWithNote);
+
+      const result = await client.updateTimeEntry('entry-42', {
+        taskName: 'New name',
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should keep an existing integration when only the name changes', async () => {
+      const entryWithIntegration: TMetricTimeEntry = {
+        ...existingEntry,
+        task: {
+          name: 'Old name',
+          externalLink: {
+            link: 'https://example.youtrack.cloud/issue/ABC-8',
+            issueId: 'ABC-8',
+          },
+          integration: {
+            url: 'https://example.youtrack.cloud',
+            type: 'YouTrack',
+          },
+        },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query(SEARCH_QUERY)
+        .reply(200, [entryWithIntegration]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-42`, (body) => {
+          expect(body.task.externalLink.issueId).toBe('ABC-8');
+          expect(body.task.integration.type).toBe('YouTrack');
+          return true;
+        })
+        .reply(200, entryWithIntegration);
+
+      const result = await client.updateTimeEntry('entry-42', {
+        taskName: 'New name',
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should use the note as task name when adding an issue link to a note-only entry', async () => {
+      const noteOnlyEntry: TMetricTimeEntry = {
+        id: 'note-entry',
+        startTime: '2024-01-10T09:00:00',
+        endTime: '2024-01-10T10:00:00',
+        project: { id: 123, name: 'Test Project' },
+        note: 'Working notes',
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query(SEARCH_QUERY)
+        .reply(200, [noteOnlyEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/note-entry`, (body) => {
+          expect(body.task.name).toBe('Working notes');
+          expect(body.task.externalLink.issueId).toBe('ABC-123');
+          expect(body.note).toBe('Working notes');
+          return true;
+        })
+        .reply(200, noteOnlyEntry);
+
+      const result = await client.updateTimeEntry('note-entry', {
+        taskUrl: 'https://example.youtrack.cloud/issue/ABC-123',
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should fail when adding an issue link to an entry with no name at all', async () => {
+      const namelessEntry: TMetricTimeEntry = {
+        id: 'nameless-entry',
+        startTime: '2024-01-10T09:00:00',
+        endTime: '2024-01-10T10:00:00',
+        project: { id: 123, name: 'Test Project' },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query(SEARCH_QUERY)
+        .reply(200, [namelessEntry]);
+
+      const result = await client.updateTimeEntry('nameless-entry', {
+        taskUrl: 'https://example.youtrack.cloud/issue/ABC-123',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('TASK_NAME_REQUIRED');
+    });
+
+    it('should search only the given entry_date when provided', async () => {
+      const oldEntry: TMetricTimeEntry = {
+        id: 'old-entry',
+        startTime: '2023-11-20T09:00:00',
+        endTime: '2023-11-20T10:00:00',
+        project: { id: 123, name: 'Test Project' },
+        task: { name: 'Old work' },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2023-11-20', endDate: '2023-11-20' })
+        .reply(200, [oldEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/old-entry`)
+        .reply(200, oldEntry);
+
+      const result = await client.updateTimeEntry('old-entry', {
+        taskName: 'Renamed old work',
+        entryDate: '2023-11-20',
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject an entry_date that is not YYYY-MM-DD', async () => {
+      const result = await client.updateTimeEntry('entry-42', {
+        taskName: 'New name',
+        entryDate: '20/11/2023',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('INVALID_DATE_FORMAT');
+    });
+
+    it('should fail with UNKNOWN_TAG for a tag not in the account', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query(SEARCH_QUERY)
+        .reply(200, [existingEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, [{ id: 1, name: 'Development', isWorkType: false }]);
+
+      const result = await client.updateTimeEntry('entry-42', {
+        tags: ['Nonexistent'],
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('UNKNOWN_TAG');
     });
 
     it('should reject a task_url without a recognizable issue', async () => {

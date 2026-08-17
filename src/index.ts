@@ -81,7 +81,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'create_time_entry',
-        description: 'Create a completed time entry for a past time range. Does not touch the running timer.',
+        description: 'Create a completed time entry for a past time range. Does not stop or start the timer, but TMetric may adjust existing entries that overlap the range.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -148,6 +148,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'array',
               items: { type: 'string' },
               description: 'New tag names; replaces all tags on the entry (empty array clears them). Tags must already exist in the TMetric account.',
+            },
+            entry_date: {
+              type: 'string',
+              description: 'Day the entry is on (YYYY-MM-DD, shown by list_time_entries). Without it, only entries from 31 days back to 7 days forward are found.',
             },
           },
           required: ['entry_id'],
@@ -283,7 +287,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'update_time_entry': {
-        const { entry_id, task_name, project_id, start_time, end_time, task_url, tags } =
+        const { entry_id, task_name, project_id, start_time, end_time, task_url, tags, entry_date } =
           args as {
             entry_id: string;
             task_name?: string;
@@ -292,6 +296,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             end_time?: string;
             task_url?: string;
             tags?: string[];
+            entry_date?: string;
           };
 
         const result = await tmetricClient.updateTimeEntry(entry_id, {
@@ -301,6 +306,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           endTime: end_time,
           taskUrl: task_url,
           tags,
+          entryDate: entry_date,
         });
 
         return {

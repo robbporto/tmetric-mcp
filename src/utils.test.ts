@@ -187,6 +187,11 @@ describe('extractYouTrackIssueId', () => {
     const url = 'https://gitlab.example.com/group/project/-/issues/123';
     expect(extractYouTrackIssueId(url)).toBeNull();
   });
+
+  it('should ignore an issue path inside a query string', () => {
+    const url = 'https://gitlab.example.com/group/project/-/issues/5?next=/issue/ABC-1';
+    expect(extractYouTrackIssueId(url)).toBeNull();
+  });
 });
 
 describe('extractBaseUrl', () => {

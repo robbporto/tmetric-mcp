@@ -14,6 +14,10 @@ import {
   parseIssueUrl
 } from './utils.js';
 
+// Local ISO date-time, no timezone suffix: "2024-01-15T09:00:00" (seconds optional)
+const LOCAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 export class TMetricClient {
   private client: AxiosInstance;
   private accountId: string | null = null;
@@ -50,6 +54,22 @@ export class TMetricClient {
   }
 
   /**
+   * Validate a user-supplied time string. TMetric wants local wall-clock
+   * times; a "Z" or offset suffix would be stored at the wrong hour, so it
+   * is rejected rather than silently written.
+   */
+  private validateLocalTime(time: string): ApiResponse | null {
+    if (!LOCAL_TIME_PATTERN.test(time) || isNaN(new Date(time).getTime())) {
+      return {
+        success: false,
+        error: 'INVALID_TIME_FORMAT',
+        message: 'Times must be local ISO date-times without a timezone suffix, e.g. "2024-01-15T09:00:00" (not "...Z" or "...+02:00")'
+      };
+    }
+    return null;
+  }
+
+  /**
    * Resolve tag names against the account's tag list.
    * Tags must exist already (no silent tag creation), matching is
    * case-insensitive, and only one work-type tag is allowed per entry.
@@ -71,14 +91,16 @@ export class TMetricClient {
 
     for (const name of tagNames) {
       const match = accountTags.find(
-        tag => tag.name?.toLowerCase() === name.trim().toLowerCase()
+        tag => tag.name?.trim().toLowerCase() === name.trim().toLowerCase()
       );
       if (match) {
-        resolved.push({
-          id: match.id,
-          name: match.name,
-          isWorkType: match.isWorkType ?? false
-        });
+        if (!resolved.some(tag => tag.id === match.id)) {
+          resolved.push({
+            id: match.id,
+            name: match.name,
+            isWorkType: match.isWorkType ?? false
+          });
+        }
       } else {
         unknown.push(name);
       }
@@ -118,11 +140,20 @@ export class TMetricClient {
   private pickCreatedEntry(
     data: TMetricTimeEntry | TMetricTimeEntry[],
     isCreated: (entry: TMetricTimeEntry) => boolean
-  ): TMetricTimeEntry {
+  ): TMetricTimeEntry | undefined {
     if (!Array.isArray(data)) {
       return data;
     }
-    return data.find(isCreated) ?? data[data.length - 1];
+    // No positional guessing: a wrong id is worse than an honest "not found"
+    return data.find(isCreated);
+  }
+
+  private entryNotIdentified(): ApiResponse {
+    return {
+      success: false,
+      error: 'ENTRY_CREATED_BUT_NOT_IDENTIFIED',
+      message: 'TMetric accepted the entry, but the response did not identify it. Use list_time_entries or get_current_timer to see the result.'
+    };
   }
 
   /**
@@ -296,6 +327,10 @@ export class TMetricClient {
 
       const created = this.pickCreatedEntry(response.data, e => e.endTime === null);
 
+      if (!created) {
+        return this.entryNotIdentified();
+      }
+
       return {
         success: true,
         timer_id: created.id,
@@ -324,16 +359,13 @@ export class TMetricClient {
     tags?: string[]
   ): Promise<ApiResponse> {
     try {
+      const timeError = this.validateLocalTime(startTime) ?? this.validateLocalTime(endTime);
+      if (timeError) {
+        return timeError;
+      }
+
       const start = new Date(startTime);
       const end = new Date(endTime);
-
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return {
-          success: false,
-          error: 'INVALID_TIME_FORMAT',
-          message: 'start_time and end_time must be ISO date-time strings (e.g. "2024-01-15T09:00:00")'
-        };
-      }
 
       if (end.getTime() <= start.getTime()) {
         return {
@@ -385,6 +417,10 @@ export class TMetricClient {
         response.data,
         e => new Date(e.startTime).getTime() === start.getTime()
       );
+
+      if (!created) {
+        return this.entryNotIdentified();
+      }
 
       const durationMinutes = calculateDurationMinutes(startTime, endTime);
 
@@ -494,8 +530,6 @@ export class TMetricClient {
    */
   async listTimeEntries(startDate: string, endDate: string): Promise<ApiResponse> {
     try {
-      const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
       if (!DATE_PATTERN.test(startDate) || !DATE_PATTERN.test(endDate)) {
         return {
           success: false,
@@ -570,10 +604,11 @@ export class TMetricClient {
       endTime?: string;
       taskUrl?: string;
       tags?: string[];
+      entryDate?: string;
     }
   ): Promise<ApiResponse> {
     try {
-      const { taskName, projectId, startTime, endTime, taskUrl, tags } = updates;
+      const { taskName, projectId, startTime, endTime, taskUrl, tags, entryDate } = updates;
 
       if (
         taskName === undefined &&
@@ -591,13 +626,20 @@ export class TMetricClient {
       }
 
       for (const time of [startTime, endTime]) {
-        if (time !== undefined && isNaN(new Date(time).getTime())) {
-          return {
-            success: false,
-            error: 'INVALID_TIME_FORMAT',
-            message: 'start_time and end_time must be ISO date-time strings (e.g. "2024-01-15T09:00:00")'
-          };
+        if (time !== undefined) {
+          const timeError = this.validateLocalTime(time);
+          if (timeError) {
+            return timeError;
+          }
         }
+      }
+
+      if (entryDate !== undefined && !DATE_PATTERN.test(entryDate)) {
+        return {
+          success: false,
+          error: 'INVALID_DATE_FORMAT',
+          message: 'entry_date must be a YYYY-MM-DD string'
+        };
       }
 
       let parsedUrl = null;
@@ -614,10 +656,11 @@ export class TMetricClient {
 
       await this.ensureInitialized();
 
-      // Find the entry: no GET-by-id in the API, so scan a date window
+      // Find the entry: no GET-by-id in the API, so scan a date window.
+      // With entry_date, search exactly that day (works for any age).
       const now = new Date();
-      const searchStart = new Date(now.getTime() - 31 * 86400000).toISOString().split('T')[0];
-      const searchEnd = new Date(now.getTime() + 7 * 86400000).toISOString().split('T')[0];
+      const searchStart = entryDate ?? new Date(now.getTime() - 31 * 86400000).toISOString().split('T')[0];
+      const searchEnd = entryDate ?? new Date(now.getTime() + 7 * 86400000).toISOString().split('T')[0];
 
       const response = await this.client.get<TMetricTimeEntry[]>(
         `/accounts/${this.accountId}/timeentries`,
@@ -635,7 +678,7 @@ export class TMetricClient {
         return {
           success: false,
           error: 'ENTRY_NOT_FOUND',
-          message: `Entry ${entryId} not found between ${searchStart} and ${searchEnd}. Use list_time_entries to find entry IDs.`
+          message: `Entry ${entryId} not found between ${searchStart} and ${searchEnd}. For entries outside this window, pass entry_date (YYYY-MM-DD) with the day the entry is on — list_time_entries shows it.`
         };
       }
 
@@ -670,7 +713,20 @@ export class TMetricClient {
         tags: mergedTags
       };
 
-      const mergedTaskName = taskName ?? entry.task?.name;
+      let mergedTaskName = taskName ?? entry.task?.name;
+
+      // An issue link lives on the task; a note-only entry lends its note as the name
+      if (parsedUrl && !mergedTaskName) {
+        if (entry.note) {
+          mergedTaskName = entry.note;
+        } else {
+          return {
+            success: false,
+            error: 'TASK_NAME_REQUIRED',
+            message: 'This entry has no task name or note. Pass task_name together with task_url to add an issue link.'
+          };
+        }
+      }
 
       if (mergedTaskName) {
         updateData.task = { name: mergedTaskName };
@@ -692,7 +748,11 @@ export class TMetricClient {
             updateData.task.integration = entry.task.integration;
           }
         }
-      } else if (entry.note) {
+      }
+
+      // The update schema allows note alongside task — keep it so an update
+      // never erases a note the entry already has
+      if (entry.note) {
         updateData.note = entry.note;
       }
 
