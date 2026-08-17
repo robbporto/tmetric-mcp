@@ -70,6 +70,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Optional GitLab, GitHub or YouTrack issue URL for integration',
             },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional tag names. Tags must already exist in the TMetric account.',
+            },
           },
           required: ['project_id', 'task_name'],
         },
@@ -100,8 +105,52 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Optional GitLab, GitHub or YouTrack issue URL for integration',
             },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional tag names. Tags must already exist in the TMetric account.',
+            },
           },
           required: ['project_id', 'task_name', 'start_time', 'end_time'],
+        },
+      },
+      {
+        name: 'update_time_entry',
+        description: 'Update an existing time entry. Fields that are not provided keep their current values. Use list_time_entries first to find the entry ID.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            entry_id: {
+              type: 'string',
+              description: 'ID of the time entry to update (from list_time_entries)',
+            },
+            task_name: {
+              type: 'string',
+              description: 'New task name',
+            },
+            project_id: {
+              type: 'number',
+              description: 'New TMetric project ID',
+            },
+            start_time: {
+              type: 'string',
+              description: 'New start time as local ISO date-time without "Z" (e.g., "2024-01-15T09:00:00")',
+            },
+            end_time: {
+              type: 'string',
+              description: 'New end time as local ISO date-time without "Z" (e.g., "2024-01-15T10:30:00")',
+            },
+            task_url: {
+              type: 'string',
+              description: 'New GitLab, GitHub or YouTrack issue URL; replaces the entry\'s issue link',
+            },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'New tag names; replaces all tags on the entry (empty array clears them). Tags must already exist in the TMetric account.',
+            },
+          },
+          required: ['entry_id'],
         },
       },
       {
@@ -180,16 +229,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'start_timer': {
-        const { project_id, task_name, task_url } = args as {
+        const { project_id, task_name, task_url, tags } = args as {
           project_id: number;
           task_name: string;
           task_url?: string;
+          tags?: string[];
         };
 
         const result = await tmetricClient.startTimer(
           project_id,
           task_name,
-          task_url
+          task_url,
+          tags
         );
 
         return {
@@ -203,12 +254,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'create_time_entry': {
-        const { project_id, task_name, start_time, end_time, task_url } = args as {
+        const { project_id, task_name, start_time, end_time, task_url, tags } = args as {
           project_id: number;
           task_name: string;
           start_time: string;
           end_time: string;
           task_url?: string;
+          tags?: string[];
         };
 
         const result = await tmetricClient.createTimeEntry(
@@ -216,8 +268,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           task_name,
           start_time,
           end_time,
-          task_url
+          task_url,
+          tags
         );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'update_time_entry': {
+        const { entry_id, task_name, project_id, start_time, end_time, task_url, tags } =
+          args as {
+            entry_id: string;
+            task_name?: string;
+            project_id?: number;
+            start_time?: string;
+            end_time?: string;
+            task_url?: string;
+            tags?: string[];
+          };
+
+        const result = await tmetricClient.updateTimeEntry(entry_id, {
+          taskName: task_name,
+          projectId: project_id,
+          startTime: start_time,
+          endTime: end_time,
+          taskUrl: task_url,
+          tags,
+        });
 
         return {
           content: [

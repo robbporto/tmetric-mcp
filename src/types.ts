@@ -3,6 +3,13 @@ export interface TMetricProject {
   name: string;
 }
 
+// Tag shape used by the API (TagBasic): tags are objects, never plain strings
+export interface TMetricTag {
+  id?: number;
+  name?: string;
+  isWorkType?: boolean;
+}
+
 export interface TMetricTimeEntry {
   id: string;
   startTime: string;
@@ -23,7 +30,7 @@ export interface TMetricTimeEntry {
     };
   };
   note?: string;
-  tags?: string[];
+  tags?: TMetricTag[];
 }
 
 export interface TMetricUser {

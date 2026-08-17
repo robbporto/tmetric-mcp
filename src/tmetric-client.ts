@@ -1,6 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import type {
   TMetricProject,
+  TMetricTag,
   TMetricTimeEntry,
   TMetricUser,
   TimerInfo,
@@ -46,6 +47,82 @@ export class TMetricClient {
     if (!this.accountId) {
       await this.initialize();
     }
+  }
+
+  /**
+   * Resolve tag names against the account's tag list.
+   * Tags must exist already (no silent tag creation), matching is
+   * case-insensitive, and only one work-type tag is allowed per entry.
+   */
+  private async resolveTags(
+    tagNames: string[]
+  ): Promise<{ ok: true; tags: TMetricTag[] } | { ok: false; response: ApiResponse }> {
+    if (tagNames.length === 0) {
+      return { ok: true, tags: [] };
+    }
+
+    const response = await this.client.get<TMetricTag[]>(
+      `/accounts/${this.accountId}/timeentries/tags`
+    );
+    const accountTags = response.data;
+
+    const resolved: TMetricTag[] = [];
+    const unknown: string[] = [];
+
+    for (const name of tagNames) {
+      const match = accountTags.find(
+        tag => tag.name?.toLowerCase() === name.trim().toLowerCase()
+      );
+      if (match) {
+        resolved.push({
+          id: match.id,
+          name: match.name,
+          isWorkType: match.isWorkType ?? false
+        });
+      } else {
+        unknown.push(name);
+      }
+    }
+
+    if (unknown.length > 0) {
+      const available = accountTags.map(tag => tag.name).filter(Boolean).join(', ');
+      return {
+        ok: false,
+        response: {
+          success: false,
+          error: 'UNKNOWN_TAG',
+          message: `Unknown tag(s): ${unknown.join(', ')}. Available tags: ${available || '(none)'}`
+        }
+      };
+    }
+
+    const workTypes = resolved.filter(tag => tag.isWorkType);
+    if (workTypes.length > 1) {
+      return {
+        ok: false,
+        response: {
+          success: false,
+          error: 'INVALID_TAGS',
+          message: `A time entry can have only one work type tag; got: ${workTypes.map(tag => tag.name).join(', ')}`
+        }
+      };
+    }
+
+    return { ok: true, tags: resolved };
+  }
+
+  /**
+   * POST /timeentries may return a single entry or, per the API spec, all
+   * entries for the affected days. Pick the one we just created.
+   */
+  private pickCreatedEntry(
+    data: TMetricTimeEntry | TMetricTimeEntry[],
+    isCreated: (entry: TMetricTimeEntry) => boolean
+  ): TMetricTimeEntry {
+    if (!Array.isArray(data)) {
+      return data;
+    }
+    return data.find(isCreated) ?? data[data.length - 1];
   }
 
   /**
@@ -162,7 +239,8 @@ export class TMetricClient {
   async startTimer(
     projectId: number,
     taskName: string,
-    taskUrl?: string
+    taskUrl?: string,
+    tags?: string[]
   ): Promise<ApiResponse> {
     try {
       await this.ensureInitialized();
@@ -176,6 +254,11 @@ export class TMetricClient {
           message: 'Cannot start new timer. A timer is already running.',
           current_timer: current
         };
+      }
+
+      const resolvedTags = await this.resolveTags(tags || []);
+      if (!resolvedTags.ok) {
+        return resolvedTags.response;
       }
 
       // Build task object
@@ -203,18 +286,20 @@ export class TMetricClient {
         endTime: null,
         project: { id: projectId },
         task,
-        tags: []
+        tags: resolvedTags.tags
       };
 
-      const response = await this.client.post<TMetricTimeEntry>(
+      const response = await this.client.post<TMetricTimeEntry | TMetricTimeEntry[]>(
         `/accounts/${this.accountId}/timeentries`,
         entryData
       );
 
+      const created = this.pickCreatedEntry(response.data, e => e.endTime === null);
+
       return {
         success: true,
-        timer_id: response.data.id,
-        started_at: response.data.startTime,
+        timer_id: created.id,
+        started_at: created.startTime,
         task_name: taskName
       };
     } catch (error: any) {
@@ -235,7 +320,8 @@ export class TMetricClient {
     taskName: string,
     startTime: string,
     endTime: string,
-    taskUrl?: string
+    taskUrl?: string,
+    tags?: string[]
   ): Promise<ApiResponse> {
     try {
       const start = new Date(startTime);
@@ -258,6 +344,11 @@ export class TMetricClient {
       }
 
       await this.ensureInitialized();
+
+      const resolvedTags = await this.resolveTags(tags || []);
+      if (!resolvedTags.ok) {
+        return resolvedTags.response;
+      }
 
       // Build task object (same issue-URL handling as startTimer)
       const task: any = { name: taskName };
@@ -282,19 +373,24 @@ export class TMetricClient {
         endTime,
         project: { id: projectId },
         task,
-        tags: []
+        tags: resolvedTags.tags
       };
 
-      const response = await this.client.post<TMetricTimeEntry>(
+      const response = await this.client.post<TMetricTimeEntry | TMetricTimeEntry[]>(
         `/accounts/${this.accountId}/timeentries`,
         entryData
+      );
+
+      const created = this.pickCreatedEntry(
+        response.data,
+        e => new Date(e.startTime).getTime() === start.getTime()
       );
 
       const durationMinutes = calculateDurationMinutes(startTime, endTime);
 
       return {
         success: true,
-        entry_id: response.data.id,
+        entry_id: created.id,
         task_name: taskName,
         started_at: startTime,
         ended_at: endTime,
@@ -443,7 +539,7 @@ export class TMetricClient {
             ? null
             : calculateDurationMinutes(entry.startTime, entry.endTime),
           task_url: entry.task?.externalLink?.link,
-          tags: entry.tags || []
+          tags: (entry.tags || []).map(tag => tag.name).filter(Boolean)
         }));
 
       return {
@@ -455,6 +551,176 @@ export class TMetricClient {
         success: false,
         error: 'API_ERROR',
         message: `Failed to list time entries: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Update an existing time entry.
+   * The API has no single-entry GET, so the entry is found by scanning a
+   * date window (31 days back to 7 days forward). The PUT re-sends the full
+   * merged body, which is safe whether the API replaces or patches.
+   */
+  async updateTimeEntry(
+    entryId: string,
+    updates: {
+      taskName?: string;
+      projectId?: number;
+      startTime?: string;
+      endTime?: string;
+      taskUrl?: string;
+      tags?: string[];
+    }
+  ): Promise<ApiResponse> {
+    try {
+      const { taskName, projectId, startTime, endTime, taskUrl, tags } = updates;
+
+      if (
+        taskName === undefined &&
+        projectId === undefined &&
+        startTime === undefined &&
+        endTime === undefined &&
+        taskUrl === undefined &&
+        tags === undefined
+      ) {
+        return {
+          success: false,
+          error: 'NO_UPDATES',
+          message: 'Provide at least one field to update'
+        };
+      }
+
+      for (const time of [startTime, endTime]) {
+        if (time !== undefined && isNaN(new Date(time).getTime())) {
+          return {
+            success: false,
+            error: 'INVALID_TIME_FORMAT',
+            message: 'start_time and end_time must be ISO date-time strings (e.g. "2024-01-15T09:00:00")'
+          };
+        }
+      }
+
+      let parsedUrl = null;
+      if (taskUrl !== undefined) {
+        parsedUrl = parseIssueUrl(taskUrl);
+        if (!parsedUrl) {
+          return {
+            success: false,
+            error: 'INVALID_TASK_URL',
+            message: 'task_url must be a GitLab, GitHub or YouTrack issue URL'
+          };
+        }
+      }
+
+      await this.ensureInitialized();
+
+      // Find the entry: no GET-by-id in the API, so scan a date window
+      const now = new Date();
+      const searchStart = new Date(now.getTime() - 31 * 86400000).toISOString().split('T')[0];
+      const searchEnd = new Date(now.getTime() + 7 * 86400000).toISOString().split('T')[0];
+
+      const response = await this.client.get<TMetricTimeEntry[]>(
+        `/accounts/${this.accountId}/timeentries`,
+        {
+          params: {
+            startDate: searchStart,
+            endDate: searchEnd
+          }
+        }
+      );
+
+      const entry = response.data.find(e => e.id === entryId);
+
+      if (!entry) {
+        return {
+          success: false,
+          error: 'ENTRY_NOT_FOUND',
+          message: `Entry ${entryId} not found between ${searchStart} and ${searchEnd}. Use list_time_entries to find entry IDs.`
+        };
+      }
+
+      // Merge: new values win, everything else keeps the fetched value
+      const mergedStart = startTime ?? entry.startTime;
+      const mergedEnd = endTime ?? entry.endTime;
+
+      if (mergedEnd !== null && new Date(mergedEnd).getTime() <= new Date(mergedStart).getTime()) {
+        return {
+          success: false,
+          error: 'INVALID_TIME_RANGE',
+          message: 'end_time must be after start_time'
+        };
+      }
+
+      // tags provided (even []) replaces the entry's tags; omitted keeps them
+      let mergedTags: TMetricTag[] = entry.tags || [];
+      if (tags !== undefined) {
+        const resolvedTags = await this.resolveTags(tags);
+        if (!resolvedTags.ok) {
+          return resolvedTags.response;
+        }
+        mergedTags = resolvedTags.tags;
+      }
+
+      const updateData: any = {
+        startTime: mergedStart,
+        endTime: mergedEnd,
+        project: {
+          id: projectId ?? entry.project?.id
+        },
+        tags: mergedTags
+      };
+
+      const mergedTaskName = taskName ?? entry.task?.name;
+
+      if (mergedTaskName) {
+        updateData.task = { name: mergedTaskName };
+
+        if (parsedUrl && taskUrl) {
+          updateData.task.externalLink = {
+            link: taskUrl,
+            issueId: parsedUrl.issueId
+          };
+          updateData.task.integration = {
+            url: parsedUrl.baseUrl,
+            type: parsedUrl.integrationType
+          };
+        } else {
+          if (entry.task?.externalLink) {
+            updateData.task.externalLink = entry.task.externalLink;
+          }
+          if (entry.task?.integration) {
+            updateData.task.integration = entry.task.integration;
+          }
+        }
+      } else if (entry.note) {
+        updateData.note = entry.note;
+      }
+
+      await this.client.put(
+        `/accounts/${this.accountId}/timeentries/${entryId}`,
+        updateData
+      );
+
+      const result: ApiResponse = {
+        success: true,
+        entry_id: entryId,
+        task_name: mergedTaskName || entry.note || 'No description',
+        started_at: mergedStart,
+        ended_at: mergedEnd
+      };
+
+      if (mergedEnd !== null) {
+        const durationMinutes = calculateDurationMinutes(mergedStart, mergedEnd);
+        result.time_spent = formatMinutesToGitLab(durationMinutes);
+        result.time_spent_minutes = durationMinutes;
+      }
+
+      return result;
+    } catch (error: any) {
+      return {
+        success: false,
+        error: 'API_ERROR',
+        message: `Failed to update time entry: ${error.message}`
       };
     }
   }

@@ -21,7 +21,7 @@ Minimal Model Context Protocol (MCP) server that integrates TMetric time trackin
 ### File Structure
 
 - `src/types.ts` — interfaces for TMetric API entities and responses
-- `src/utils.ts` — duration calculation and issue-URL parsing (GitHub and GitLab)
+- `src/utils.ts` — duration calculation and issue-URL parsing (GitHub, GitLab, YouTrack)
 - `src/tmetric-client.ts` — TMetric API client with all timer operations
 - `src/index.ts` — MCP server entry point; registers tools, stdio transport
 - `src/utils.test.ts`, `src/tmetric-client.test.ts` — vitest suites
@@ -52,11 +52,15 @@ Minimal Model Context Protocol (MCP) server that integrates TMetric time trackin
 
 **Single Timer Enforcement**: `startTimer()` checks for a running timer first and returns `TIMER_ALREADY_RUNNING` (with `current_timer` attached) instead of creating a second entry.
 
-**Issue URL Integration** (GitHub and GitLab) — when `task_url` is passed to `start_timer`:
-1. `extractIssueNumber()` matches `/issues\/(\d+)/` (fits both GitHub and GitLab URLs)
-2. `detectIntegrationType()` returns `'GitHub'` when the host contains `github.com`, otherwise `'GitLab'` (also the fallback for unparseable URLs)
-3. The task gets `externalLink: {link, issueId: "<Type> Issue: #123"}` and `integration: {url: <base URL>, type}`
-4. No issue number in the URL → the URL is silently ignored (plain task, no integration fields)
+**Issue URL Integration** (GitHub, GitLab, YouTrack) — `parseIssueUrl()` in `src/utils.ts` is the single entry point used by `start_timer`, `create_time_entry`, and `update_time_entry`:
+1. `detectIntegrationType()`: `'GitHub'` when the host contains `github.com`; `'YouTrack'` when the host contains `youtrack` or the path matches `/issue/KEY-123`; otherwise `'GitLab'` (also the fallback for unparseable URLs)
+2. GitHub/GitLab: issue number from `/issues\/(\d+)/`, displayed as `"<Type> Issue: #123"`. YouTrack: the bare issue key (e.g. `ABC-123`) — the exact `'YouTrack'` type string and bare-key format match TMetric's official browser extension
+3. The task gets `externalLink: {link, issueId}` and `integration: {url: <base URL>, type}`
+4. No recognizable issue in the URL → `start_timer`/`create_time_entry` silently ignore the URL; `update_time_entry` returns `INVALID_TASK_URL`
+
+**Tags** are API objects (`{id, name, isWorkType}`), never plain strings. Tool inputs take tag *names*; `resolveTags()` matches them (case-insensitive) against `GET /accounts/{accountId}/timeentries/tags` and errors on unknown names (`UNKNOWN_TAG`) — no silent tag creation. At most one `isWorkType` tag per entry (`INVALID_TAGS`).
+
+**update_time_entry** has no single-entry GET to lean on (the API only defines PUT/DELETE on `/timeentries/{id}`), so it finds the entry by scanning a window of 31 days back to 7 days forward, then PUTs the full merged body (fetched values for anything not being changed).
 
 **delete_time_entry modes** (see the design doc in `docs/plans/`): mode `'current'` (default) deletes only the running timer; mode `'last'` deletes today's most recent entry but refuses if it stopped more than 5 minutes ago. Deliberately no delete-by-ID — the design doc says specific-entry management belongs in the TMetric web UI. Error codes: `NO_TIMER_RUNNING`, `NO_ENTRIES_FOUND`, `ENTRY_TOO_OLD`, `API_ERROR`.
 
@@ -66,8 +70,11 @@ Minimal Model Context Protocol (MCP) server that integrates TMetric time trackin
 
 - `list_tmetric_projects` — projects available for time tracking
 - `get_current_timer` — whether a timer is running, plus its details
-- `start_timer(project_id, task_name, task_url?)` — fails if a timer is already running; `task_url` may be a GitLab or GitHub issue URL
+- `start_timer(project_id, task_name, task_url?, tags?)` — fails if a timer is already running; `task_url` may be a GitLab, GitHub or YouTrack issue URL
 - `stop_timer` — stops the active timer, returns time spent in GitLab format
+- `create_time_entry(project_id, task_name, start_time, end_time, task_url?, tags?)` — completed entry for a past range; local ISO times without `Z`
+- `list_time_entries(start_date, end_date)` — entries in a `YYYY-MM-DD` range, oldest first, with IDs for updating
+- `update_time_entry(entry_id, ...optional fields)` — omitted fields keep their values; `tags` replaces all tags
 - `delete_time_entry(mode?: 'current' | 'last')` — see modes above
 
 ## Testing
