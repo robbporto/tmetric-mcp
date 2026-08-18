@@ -157,6 +157,59 @@ export class TMetricClient {
   }
 
   /**
+   * Current time as a local ISO string without the Z suffix, matching the
+   * local-time format TMetric uses for startTime.
+   */
+  private localNow(): string {
+    const now = new Date();
+    return new Date(now.getTime() - (now.getTimezoneOffset() * 60000))
+      .toISOString()
+      .slice(0, -1); // Remove Z suffix
+  }
+
+  /**
+   * Close an open entry by PUTting a minimal body with the given endTime.
+   * Shared by stopTimer and the startTimer switch path so the two cannot
+   * drift apart.
+   */
+  private async closeTimeEntry(
+    activeEntry: TMetricTimeEntry,
+    endTime: string
+  ): Promise<void> {
+    // Build clean request body with only necessary fields
+    const updateData: any = {
+      startTime: activeEntry.startTime,
+      endTime: endTime,
+      project: {
+        id: activeEntry.project?.id
+      },
+      tags: activeEntry.tags || []
+    };
+
+    // Include task if present (with name), otherwise use note
+    if (activeEntry.task && activeEntry.task.name) {
+      updateData.task = {
+        name: activeEntry.task.name
+      };
+
+      if (activeEntry.task.externalLink) {
+        updateData.task.externalLink = activeEntry.task.externalLink;
+      }
+
+      if (activeEntry.task.integration) {
+        updateData.task.integration = activeEntry.task.integration;
+      }
+    } else if (activeEntry.note) {
+      updateData.note = activeEntry.note;
+    }
+
+    await this.client.put(
+      `/accounts/${this.accountId}/timeentries/${activeEntry.id}`,
+      updateData
+    );
+  }
+
+  /**
    * Get list of projects
    */
   async listProjects(): Promise<ApiResponse> {
@@ -265,7 +318,9 @@ export class TMetricClient {
   }
 
   /**
-   * Start a new timer
+   * Start a new timer. If a timer is already running, it is closed on the
+   * exact timestamp the new one starts, so TMetric never shows a break
+   * between the two entries.
    */
   async startTimer(
     projectId: number,
@@ -273,20 +328,11 @@ export class TMetricClient {
     taskUrl?: string,
     tags?: string[]
   ): Promise<ApiResponse> {
+    let stoppedPrevious = false;
     try {
       await this.ensureInitialized();
 
-      // CRITICAL: Check if timer already running
-      const current = await this.getCurrentTimer();
-      if (current.is_running) {
-        return {
-          success: false,
-          error: 'TIMER_ALREADY_RUNNING',
-          message: 'Cannot start new timer. A timer is already running.',
-          current_timer: current
-        };
-      }
-
+      // Validate tags before any write so an unknown tag has no side effects
       const resolvedTags = await this.resolveTags(tags || []);
       if (!resolvedTags.ok) {
         return resolvedTags.response;
@@ -311,9 +357,38 @@ export class TMetricClient {
         }
       }
 
-      // Create time entry with startTime: null (means "now")
+      // If a timer is running, close it and start the new entry on the same
+      // timestamp; with no running timer, startTime: null means "start now"
+      const activeEntry = await this.getActiveTimeEntry();
+      let startTime: string | null = null;
+      let switchedFrom: Record<string, unknown> | undefined;
+
+      if (activeEntry) {
+        const ts = this.localNow();
+        try {
+          await this.closeTimeEntry(activeEntry, ts);
+        } catch (error: any) {
+          return {
+            success: false,
+            error: 'API_ERROR',
+            message: `Failed to stop the running timer, so no new timer was started: ${error.message}`
+          };
+        }
+        stoppedPrevious = true;
+        startTime = ts;
+
+        const durationMinutes = calculateDurationMinutes(activeEntry.startTime, ts);
+        switchedFrom = {
+          task_name: activeEntry.task?.name || activeEntry.note || 'No description',
+          time_spent: formatMinutesToGitLab(durationMinutes),
+          time_spent_minutes: durationMinutes,
+          started_at: activeEntry.startTime,
+          ended_at: ts
+        };
+      }
+
       const entryData = {
-        startTime: null,
+        startTime,
         endTime: null,
         project: { id: projectId },
         task,
@@ -328,20 +403,27 @@ export class TMetricClient {
       const created = this.pickCreatedEntry(response.data, e => e.endTime === null);
 
       if (!created) {
-        return this.entryNotIdentified();
+        const notIdentified = this.entryNotIdentified();
+        return switchedFrom ? { ...notIdentified, switched_from: switchedFrom } : notIdentified;
       }
 
-      return {
+      const result: ApiResponse = {
         success: true,
         timer_id: created.id,
         started_at: created.startTime,
         task_name: taskName
       };
+      if (switchedFrom) {
+        result.switched_from = switchedFrom;
+      }
+      return result;
     } catch (error: any) {
       return {
         success: false,
         error: 'API_ERROR',
-        message: `Failed to start timer: ${error.message}`
+        message: stoppedPrevious
+          ? `The previous timer was stopped, but starting the new timer failed: ${error.message}`
+          : `Failed to start timer: ${error.message}`
       };
     }
   }
@@ -460,49 +542,12 @@ export class TMetricClient {
         };
       }
 
-      const timerId = activeEntry.id;
       const startTime = activeEntry.startTime;
 
       // Set endTime to now in local timezone (matching startTime format)
-      const now = new Date();
-      const endTime = new Date(now.getTime() - (now.getTimezoneOffset() * 60000))
-        .toISOString()
-        .slice(0, -1); // Remove Z suffix
+      const endTime = this.localNow();
 
-      // Build clean request body with only necessary fields
-      const updateData: any = {
-        startTime: startTime,
-        endTime: endTime,
-        project: {
-          id: activeEntry.project?.id
-        },
-        tags: activeEntry.tags || []
-      };
-
-      // Include task if present (with name), otherwise use note
-      if (activeEntry.task && activeEntry.task.name) {
-        updateData.task = {
-          name: activeEntry.task.name
-        };
-
-        // Add external link if present
-        if (activeEntry.task.externalLink) {
-          updateData.task.externalLink = activeEntry.task.externalLink;
-        }
-
-        // Add integration if present
-        if (activeEntry.task.integration) {
-          updateData.task.integration = activeEntry.task.integration;
-        }
-      } else if (activeEntry.note) {
-        updateData.note = activeEntry.note;
-      }
-
-      // Update entry with PUT
-      await this.client.put(
-        `/accounts/${this.accountId}/timeentries/${timerId}`,
-        updateData
-      );
+      await this.closeTimeEntry(activeEntry, endTime);
 
       // Calculate duration
       const durationMinutes = calculateDurationMinutes(startTime, endTime);

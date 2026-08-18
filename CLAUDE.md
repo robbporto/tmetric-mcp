@@ -35,7 +35,7 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 - Lazy initialization: `accountId` is fetched once from `GET /user` (field `activeAccountId`) via `ensureInitialized()` on the first API call. It is the ONLY cached state.
 - Timer state is never cached: every check re-queries today's entries from the API. The active timer is the entry with `endTime === null`.
 - Methods return structured `ApiResponse` objects (`{success, error?, message?, ...}`) instead of throwing. Two exceptions throw on failure: `getCurrentTimer()` (returns `TimerInfo`) and `initialize()`.
-- `stopTimer()` builds `endTime` as a LOCAL-time ISO string with the trailing `Z` removed (shifts by the timezone offset) so it matches the local-time format TMetric uses for `startTime`. It PUTs a hand-built minimal body: `startTime`, `endTime`, `project.id`, `tags`, plus `task` (with `externalLink`/`integration` when present) or `note`.
+- Closing an entry is shared logic: `localNow()` builds a LOCAL-time ISO string with the trailing `Z` removed (shifts by the timezone offset) so it matches the local-time format TMetric uses for `startTime`; `closeTimeEntry()` PUTs a hand-built minimal body: `startTime`, `endTime`, `project.id`, `tags`, plus `task` (with `externalLink`/`integration` when present) or `note`. Both `stopTimer()` and the `startTimer()` switch path use these helpers.
 
 **MCP Server** (`src/index.ts`):
 - Single shared `TMetricClient` instance across all tool calls
@@ -50,7 +50,7 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 
 ### Critical Implementation Details
 
-**Single Timer Enforcement**: `startTimer()` checks for a running timer first and returns `TIMER_ALREADY_RUNNING` (with `current_timer` attached) instead of creating a second entry.
+**Timer Switching**: `startTimer()` never leaves two timers running. If a timer is running, it closes that entry via `closeTimeEntry()` and creates the new entry with `startTime` set to the identical local timestamp — same second on both, so TMetric can never show a "Break" between them. The success response then carries `switched_from` (`task_name`, `time_spent`, `time_spent_minutes`, `started_at`, `ended_at`). Ordering guarantees: tags are validated before any write (an unknown tag leaves the running timer untouched); if closing the old entry fails, no new entry is created (`API_ERROR`, "no new timer was started"); if creating the new entry fails after the close, the `API_ERROR` message says the previous timer was already stopped.
 
 **Issue URL Integration** (GitHub, GitLab, YouTrack) — `parseIssueUrl()` in `src/utils.ts` is the single entry point used by `start_timer`, `create_time_entry`, and `update_time_entry`:
 1. `detectIntegrationType()`: `'GitHub'` when the host contains `github.com`; `'YouTrack'` when the host contains `youtrack` or the path matches `/issue/KEY-123`; otherwise `'GitLab'` (also the fallback for unparseable URLs)
@@ -70,7 +70,7 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 
 - `list_tmetric_projects` — projects available for time tracking
 - `get_current_timer` — whether a timer is running, plus its details
-- `start_timer(project_id, task_name, task_url?, tags?)` — fails if a timer is already running; `task_url` may be a GitLab, GitHub or YouTrack issue URL
+- `start_timer(project_id, task_name, task_url?, tags?)` — if a timer is already running it is stopped on the same timestamp the new one starts (reported as `switched_from`); `task_url` may be a GitLab, GitHub or YouTrack issue URL
 - `stop_timer` — stops the active timer, returns time spent in GitLab format
 - `create_time_entry(project_id, task_name, start_time, end_time, task_url?, tags?)` — completed entry for a past range; local ISO times without `Z`
 - `list_time_entries(start_date, end_date)` — entries in a `YYYY-MM-DD` range, oldest first, with IDs for updating

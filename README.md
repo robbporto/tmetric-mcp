@@ -132,7 +132,10 @@ Check if a timer is running.
 ### start_timer(project_id, task_name, task_url?, tags?)
 Start tracking time on a project/task. `task_url` may be a GitLab, GitHub or
 YouTrack issue URL (e.g. `https://example.youtrack.cloud/issue/ABC-123`) and
-links the entry to that issue. Fails if a timer is already running.
+links the entry to that issue. If a timer is already running, it is stopped
+at the exact moment the new one starts — so TMetric shows no break between
+the two entries — and the response reports the stopped entry under
+`switched_from`.
 
 ### stop_timer()
 Stop current timer and return time spent.
@@ -224,9 +227,6 @@ Make sure you've set the environment variable with your API token.
 
 ### "Failed to initialize TMetric client"
 Check that your API token is valid and you have network access to TMetric.
-
-### "Timer already running"
-This is expected behavior. Stop the current timer before starting a new one.
 
 ## Used By
 

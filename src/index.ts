@@ -54,7 +54,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'start_timer',
-        description: 'Start time tracking on a project and task. Will fail if another timer is already running.',
+        description: 'Start time tracking on a project and task. If another timer is already running, it is stopped at the exact moment the new one starts (no gap between the entries) and the response reports the stopped entry under switched_from.',
         inputSchema: {
           type: 'object',
           properties: {

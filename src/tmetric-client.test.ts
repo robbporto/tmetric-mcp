@@ -569,29 +569,193 @@ describe('TMetricClient', () => {
       expect(result.error).toBe('ENTRY_CREATED_BUT_NOT_IDENTIFIED');
     });
 
-    it('should fail when timer already running', async () => {
-      const runningEntry: TMetricTimeEntry[] = [
-        {
-          id: 'existing-entry',
-          startTime: '2024-01-15T10:00:00Z',
-          endTime: null,
-          project: { id: 456, name: 'Other Project' },
-          task: { name: 'Existing Task' },
-        },
-      ];
+    it('should close a running timer and start the new one at the same timestamp', async () => {
+      const runningEntry: TMetricTimeEntry = {
+        id: 'existing-entry',
+        startTime: '2024-01-15T10:00:00Z',
+        endTime: null,
+        project: { id: 456, name: 'Other Project' },
+        task: { name: 'Existing Task' },
+      };
 
       nock(TMETRIC_BASE_URL)
         .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
         .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
-        .reply(200, runningEntry);
+        .reply(200, [runningEntry]);
+
+      let closedAt: string | undefined;
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/existing-entry`, (body) => {
+          closedAt = body.endTime;
+          // endTime is in local format (no Z suffix), like stopTimer
+          expect(body.endTime).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$/);
+          expect(body.startTime).toBe('2024-01-15T10:00:00Z');
+          expect(body.project.id).toBe(456);
+          expect(body.task.name).toBe('Existing Task');
+          return true;
+        })
+        .reply(200, { ...runningEntry, endTime: '2024-01-15T12:00:00' });
+
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`, (body) => {
+          // The new entry starts on the exact timestamp the old one ended,
+          // so TMetric cannot show a "Break" between them
+          expect(body.startTime).toBe(closedAt);
+          expect(body.endTime).toBeNull();
+          expect(body.project.id).toBe(123);
+          expect(body.task.name).toBe('New Task');
+          return true;
+        })
+        .reply(200, {
+          id: 'new-entry',
+          startTime: '2024-01-15T12:00:00',
+          endTime: null,
+          project: { id: 123, name: 'Test Project' },
+          task: { name: 'New Task' },
+        });
+
+      const result = await client.startTimer(123, 'New Task');
+
+      expect(result.success).toBe(true);
+      expect(result.timer_id).toBe('new-entry');
+      expect(result.switched_from).toBeDefined();
+      expect(result.switched_from.task_name).toBe('Existing Task');
+      expect(result.switched_from.time_spent).toBe('2h'); // 10:00 to 12:00
+      expect(result.switched_from.time_spent_minutes).toBe(120);
+      expect(result.switched_from.started_at).toBe('2024-01-15T10:00:00Z');
+      expect(result.switched_from.ended_at).toBe(closedAt);
+    });
+
+    it('should preserve the old entry tags and issue link when switching', async () => {
+      const runningEntry: TMetricTimeEntry = {
+        id: 'existing-entry',
+        startTime: '2024-01-15T10:00:00Z',
+        endTime: null,
+        project: { id: 456, name: 'Other Project' },
+        task: {
+          name: 'ABC-123 Old work',
+          externalLink: {
+            link: 'https://example.youtrack.cloud/issue/ABC-123',
+            issueId: 'ABC-123',
+          },
+          integration: {
+            url: 'https://example.youtrack.cloud',
+            type: 'YouTrack',
+          },
+        },
+        tags: [{ id: 9, name: 'Development', isWorkType: false }],
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, [runningEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/existing-entry`, (body) => {
+          expect(body.tags).toEqual([{ id: 9, name: 'Development', isWorkType: false }]);
+          expect(body.task.externalLink.issueId).toBe('ABC-123');
+          expect(body.task.integration.type).toBe('YouTrack');
+          return true;
+        })
+        .reply(200, { ...runningEntry, endTime: '2024-01-15T12:00:00' });
+
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .reply(200, {
+          id: 'new-entry',
+          startTime: '2024-01-15T12:00:00',
+          endTime: null,
+          project: { id: 123, name: 'Test Project' },
+          task: { name: 'New Task' },
+        });
+
+      const result = await client.startTimer(123, 'New Task');
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should not start a new timer when closing the old one fails', async () => {
+      const runningEntry: TMetricTimeEntry = {
+        id: 'existing-entry',
+        startTime: '2024-01-15T10:00:00Z',
+        endTime: null,
+        project: { id: 456, name: 'Other Project' },
+        task: { name: 'Existing Task' },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, [runningEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/existing-entry`)
+        .reply(400, { error: 'Bad request' });
+
+      // No POST mock: if the code tried to create the new entry anyway,
+      // nock would reject the request and the message below would not match
+      const result = await client.startTimer(123, 'New Task');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('API_ERROR');
+      expect(result.message).toContain('no new timer was started');
+    });
+
+    it('should say the old timer was stopped when starting the new one fails', async () => {
+      const runningEntry: TMetricTimeEntry = {
+        id: 'existing-entry',
+        startTime: '2024-01-15T10:00:00Z',
+        endTime: null,
+        project: { id: 456, name: 'Other Project' },
+        task: { name: 'Existing Task' },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, [runningEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/existing-entry`)
+        .reply(200, { ...runningEntry, endTime: '2024-01-15T12:00:00' });
+
+      nock(TMETRIC_BASE_URL)
+        .post(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .reply(400, { error: 'Bad request' });
 
       const result = await client.startTimer(123, 'New Task');
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe('TIMER_ALREADY_RUNNING');
-      expect(result.message).toContain('Cannot start new timer');
-      expect(result.current_timer).toBeDefined();
-      expect(result.current_timer?.task_name).toBe('Existing Task');
+      expect(result.error).toBe('API_ERROR');
+      expect(result.message).toContain('previous timer was stopped');
+    });
+
+    it('should leave the running timer untouched when a tag is unknown', async () => {
+      const runningEntry: TMetricTimeEntry = {
+        id: 'existing-entry',
+        startTime: '2024-01-15T10:00:00Z',
+        endTime: null,
+        project: { id: 456, name: 'Other Project' },
+        task: { name: 'Existing Task' },
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, [runningEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, [{ id: 1, name: 'Development', isWorkType: false }]);
+
+      // No PUT/POST mocks: an unknown tag must fail before any write happens.
+      // If the code stopped the timer first, the unmatched PUT would surface
+      // as API_ERROR instead of UNKNOWN_TAG.
+      const result = await client.startTimer(123, 'New Task', undefined, ['Nonexistent']);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('UNKNOWN_TAG');
     });
 
     it('should handle GitLab URL without issue number', async () => {
