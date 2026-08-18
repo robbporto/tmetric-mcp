@@ -35,7 +35,7 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 - Lazy initialization: `accountId` is fetched once from `GET /user` (field `activeAccountId`) via `ensureInitialized()` on the first API call. It is the ONLY cached state.
 - Timer state is never cached: every check re-queries today's entries from the API. The active timer is the entry with `endTime === null`.
 - Methods return structured `ApiResponse` objects (`{success, error?, message?, ...}`) instead of throwing. Two exceptions throw on failure: `getCurrentTimer()` (returns `TimerInfo`) and `initialize()`.
-- Closing an entry is shared logic: `localNow()` builds a LOCAL-time ISO string with the trailing `Z` removed (shifts by the timezone offset) so it matches the local-time format TMetric uses for `startTime`; `closeTimeEntry()` PUTs a hand-built minimal body: `startTime`, `endTime`, `project.id`, `tags`, plus `task` (with `externalLink`/`integration` when present) or `note`. Both `stopTimer()` and the `startTimer()` switch path use these helpers.
+- Closing an entry is shared logic: `localNow()` builds a LOCAL-time ISO string with the trailing `Z` removed (shifts by the timezone offset) so it matches the local-time format TMetric uses for `startTime`; `closeTimeEntry()` PUTs a hand-built minimal body: `startTime`, `endTime`, `project.id`, `tags`, plus `task` (with `externalLink`/`integration` when present) and, whenever the entry has one, `note` — the PUT replaces the entry, so omitting the note would erase it (same rule as `updateTimeEntry`). Both `stopTimer()` and the `startTimer()` switch path use these helpers.
 
 **MCP Server** (`src/index.ts`):
 - Single shared `TMetricClient` instance across all tool calls

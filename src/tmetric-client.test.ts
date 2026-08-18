@@ -587,6 +587,9 @@ describe('TMetricClient', () => {
       nock(TMETRIC_BASE_URL)
         .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/existing-entry`, (body) => {
           closedAt = body.endTime;
+          // Move the clock so a second "now" lookup between the close and the
+          // create would produce a different value and fail the POST assertion
+          vi.setSystemTime(new Date('2024-01-15T12:05:00Z'));
           // endTime is in local format (no Z suffix), like stopTimer
           expect(body.endTime).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$/);
           expect(body.startTime).toBe('2024-01-15T10:00:00Z');
@@ -1084,6 +1087,35 @@ describe('TMetricClient', () => {
       expect(result.task_name).toBe('Test Task');
     });
 
+    it('should keep the note when the entry has both a task and a note', async () => {
+      const runningEntry: TMetricTimeEntry = {
+        id: 'timer-123',
+        startTime: '2024-01-15T10:00:00Z',
+        endTime: null,
+        project: { id: 456, name: 'Test Project' },
+        task: { name: 'Test Task' },
+        note: 'Extra context',
+      };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
+        .reply(200, [runningEntry]);
+
+      // The PUT replaces the entry, so omitting the note would erase it
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/timer-123`, (body) => {
+          expect(body.task.name).toBe('Test Task');
+          expect(body.note).toBe('Extra context');
+          return true;
+        })
+        .reply(200, [{ ...runningEntry, endTime: '2024-01-15T12:00:00' }]);
+
+      const result = await client.stopTimer();
+
+      expect(result.success).toBe(true);
+    });
+
     it('should fail when no timer is running', async () => {
       nock(TMETRIC_BASE_URL)
         .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
@@ -1112,10 +1144,6 @@ describe('TMetricClient', () => {
         .reply(200, [runningEntry]);
 
       nock(TMETRIC_BASE_URL)
-        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/timer-123`)
-        .reply(200, runningEntry);
-
-      nock(TMETRIC_BASE_URL)
         .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/timer-123`)
         .reply(200, { ...runningEntry, endTime: '2024-01-15T12:00:00Z' });
 
@@ -1127,21 +1155,9 @@ describe('TMetricClient', () => {
     });
 
     it('should handle API errors when getting entry', async () => {
-      const runningEntry: TMetricTimeEntry = {
-        id: 'timer-123',
-        startTime: '2024-01-15T10:00:00Z',
-        endTime: null,
-        project: { id: 456, name: 'Test Project' },
-        task: { name: 'Test Task' },
-      };
-
       nock(TMETRIC_BASE_URL)
         .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
         .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
-        .reply(200, [runningEntry]);
-
-      nock(TMETRIC_BASE_URL)
-        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/timer-123`)
         .reply(500, { error: 'Server error' });
 
       const result = await client.stopTimer();
@@ -1163,10 +1179,6 @@ describe('TMetricClient', () => {
         .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
         .query({ startDate: '2024-01-15', endDate: '2024-01-15' })
         .reply(200, [runningEntry]);
-
-      nock(TMETRIC_BASE_URL)
-        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/timer-123`)
-        .reply(200, runningEntry);
 
       nock(TMETRIC_BASE_URL)
         .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/timer-123`)

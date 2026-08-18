@@ -186,7 +186,6 @@ export class TMetricClient {
       tags: activeEntry.tags || []
     };
 
-    // Include task if present (with name), otherwise use note
     if (activeEntry.task && activeEntry.task.name) {
       updateData.task = {
         name: activeEntry.task.name
@@ -199,7 +198,11 @@ export class TMetricClient {
       if (activeEntry.task.integration) {
         updateData.task.integration = activeEntry.task.integration;
       }
-    } else if (activeEntry.note) {
+    }
+
+    // The PUT replaces the entry, so a note is sent whenever present —
+    // omitting it would erase it (same rule as updateTimeEntry)
+    if (activeEntry.note) {
       updateData.note = activeEntry.note;
     }
 
