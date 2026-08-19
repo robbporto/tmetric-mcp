@@ -1377,6 +1377,28 @@ describe('TMetricClient', () => {
       expect(result.task_name).toBe('New name');
     });
 
+    it('should find the entry when the API returns a numeric id', async () => {
+      const numericIdEntry = { ...existingEntry, id: 220750176 };
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query(SEARCH_QUERY)
+        .reply(200, [numericIdEntry]);
+
+      nock(TMETRIC_BASE_URL)
+        .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/220750176`, (body) => {
+          expect(body.task.name).toBe('New name');
+          return true;
+        })
+        .reply(200, { ...numericIdEntry, task: { name: 'New name' } });
+
+      const result = await client.updateTimeEntry('220750176', {
+        taskName: 'New name',
+      });
+
+      expect(result.success).toBe(true);
+    });
+
     it('should update start and end times', async () => {
       nock(TMETRIC_BASE_URL)
         .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)

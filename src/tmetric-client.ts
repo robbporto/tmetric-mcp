@@ -720,7 +720,7 @@ export class TMetricClient {
         }
       );
 
-      const entry = response.data.find(e => e.id === entryId);
+      const entry = response.data.find(e => String(e.id) === String(entryId));
 
       if (!entry) {
         return {
