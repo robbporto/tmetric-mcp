@@ -47,6 +47,7 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 - Base URL: `https://app.tmetric.com/api/v3`, Bearer token from `TMETRIC_API_TOKEN` (the only environment variable; the server exits at startup if unset)
 - Account-scoped endpoints: `GET/POST /accounts/{accountId}/timeentries`, `PUT/DELETE /accounts/{accountId}/timeentries/{id}`
 - `POST` with `startTime: null` means "start now"
+- Verified against the real API (2026-10-30): `PUT /timeentries/{id}` REPLACES the entry and assigns it a NEW id (the old id stops existing); any field left out of the body is cleared (omitting `note`, `note: ""` and `note: null` all clear the note); `POST` and `PUT` respond with an ARRAY of entries (other entries of the same day too, so never take `data[0]`); `GET /timeentries/{id}` returns 405 (no single-entry GET)
 
 ### Critical Implementation Details
 
@@ -60,9 +61,9 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 
 **Tags** are API objects (`{id, name, isWorkType}`), never plain strings. Tool inputs take tag *names*; `resolveTags()` matches them (case-insensitive) against `GET /accounts/{accountId}/timeentries/tags` and errors on unknown names (`UNKNOWN_TAG`) — no silent tag creation. At most one `isWorkType` tag per entry (`INVALID_TAGS`).
 
-**update_time_entry** has no single-entry GET to lean on (the API only defines PUT/DELETE on `/timeentries/{id}`), so it finds the entry by scanning a window of 31 days back to 7 days forward — or exactly `entry_date` when given — then PUTs the full merged body (fetched values for anything not being changed, including a `note` carried alongside the task). User-supplied times must match `LOCAL_TIME_PATTERN` (local ISO, no `Z`/offset suffix) or they are rejected with `INVALID_TIME_FORMAT` — a `Z`-suffixed time would be stored at the wrong hour.
+**update_time_entry** has no single-entry GET to lean on (the API only defines PUT/DELETE on `/timeentries/{id}`), so it finds the entry by scanning a window of 31 days back to 7 days forward — or exactly `entry_date` when given — then PUTs the full merged body (fetched values for anything not being changed, including a `note` carried alongside the task). The lookup lives in the private `findEntryById()`, shared with delete-by-ID. Because the PUT replaces the entry and assigns a new id, the response's `entry_id` is the NEW id (`previous_entry_id` is the one passed in), found by content match in the PUT response, then in a GET of the entry's day; if neither identifies it uniquely, `entry_id` is `null` with an explanatory message. `note`: omitted keeps the existing note, a string sets it, the exact empty string `""` is left out of the body, which clears it. User-supplied times must match `LOCAL_TIME_PATTERN` (local ISO, no `Z`/offset suffix) or they are rejected with `INVALID_TIME_FORMAT` — a `Z`-suffixed time would be stored at the wrong hour.
 
-**delete_time_entry modes** (see the design doc in `docs/plans/`): mode `'current'` (default) deletes only the running timer; mode `'last'` deletes today's most recent entry but refuses if it stopped more than 5 minutes ago. Deliberately no delete-by-ID — the design doc says specific-entry management belongs in the TMetric web UI. Error codes: `NO_TIMER_RUNNING`, `NO_ENTRIES_FOUND`, `ENTRY_TOO_OLD`, `API_ERROR`.
+**delete_time_entry modes** (see the design doc in `docs/plans/`): mode `'current'` (default) deletes only the running timer; mode `'last'` deletes today's most recent entry but refuses if it stopped more than 5 minutes ago. Optional `entry_id` (+ `entry_date`) deletes that specific stopped entry instead, ignoring mode (same lookup window as `update_time_entry`); a running entry is refused with `ENTRY_RUNNING` (stop it first). Delete-by-ID was added on 2026-10-30 on request, superseding the design doc's "no delete-by-ID" stance; the 5-minute rule still applies to mode `'last'`. Error codes: `NO_TIMER_RUNNING`, `NO_ENTRIES_FOUND`, `ENTRY_TOO_OLD`, `ENTRY_RUNNING`, `ENTRY_NOT_FOUND`, `INVALID_DATE_FORMAT`, `API_ERROR`.
 
 **Time Formats**: `calculateElapsed()` → `"Xh Ym"` / `"Ym"` (with space, for display of running timers); `formatMinutesToGitLab()` → `"XhYm"` / `"Xh"` / `"Ym"` (no space, GitLab time-tracking syntax).
 
@@ -74,9 +75,9 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 - `start_timer(project_id, task_name, task_url?, tags?)` — if a timer is already running it is stopped on the same timestamp the new one starts (reported as `switched_from`); `task_url` may be a GitLab, GitHub or YouTrack issue URL
 - `stop_timer` — stops the active timer, returns time spent in GitLab format
 - `create_time_entry(project_id, task_name, start_time, end_time, task_url?, tags?)` — completed entry for a past range; local ISO times without `Z`
-- `list_time_entries(start_date, end_date)` — entries in a `YYYY-MM-DD` range, oldest first, with IDs for updating
-- `update_time_entry(entry_id, ...optional fields)` — omitted fields keep their values; `tags` replaces all tags
-- `delete_time_entry(mode?: 'current' | 'last')` — see modes above
+- `list_time_entries(start_date, end_date)` — entries in a `YYYY-MM-DD` range, oldest first, with IDs for updating; each entry carries `note` (null when none) and `has_task` (false = note-only entry; `task_name` falls back to the note)
+- `update_time_entry(entry_id, ...optional fields)` — omitted fields keep their values; `tags` replaces all tags; `note` sets the note (empty string clears it); returns the entry's NEW id
+- `delete_time_entry(mode?: 'current' | 'last', entry_id?, entry_date?)` — see modes above; `entry_id` deletes a specific stopped entry
 
 ## Testing
 

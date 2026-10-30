@@ -642,6 +642,8 @@ export class TMetricClient {
         .map(entry => ({
           id: entry.id,
           task_name: entry.task?.name || entry.note || 'No description',
+          note: entry.note || null,
+          has_task: Boolean(entry.task?.name),
           project_name: entry.project?.name || 'No project',
           project_id: entry.project?.id,
           start_time: entry.startTime,
@@ -668,10 +670,50 @@ export class TMetricClient {
   }
 
   /**
+   * Find an entry by id. The API has no single-entry GET, so this scans a
+   * date window: 31 days back to 7 days forward, or exactly entryDate when
+   * given (works for any age). Shared by update and delete so the window
+   * rule lives in one place. Callers must have called ensureInitialized().
+   */
+  private async findEntryById(
+    entryId: string,
+    entryDate?: string
+  ): Promise<{ entry: TMetricTimeEntry } | { response: ApiResponse }> {
+    const now = new Date();
+    const searchStart = entryDate ?? new Date(now.getTime() - 31 * 86400000).toISOString().split('T')[0];
+    const searchEnd = entryDate ?? new Date(now.getTime() + 7 * 86400000).toISOString().split('T')[0];
+
+    const response = await this.client.get<TMetricTimeEntry[]>(
+      `/accounts/${this.accountId}/timeentries`,
+      {
+        params: {
+          startDate: searchStart,
+          endDate: searchEnd
+        }
+      }
+    );
+
+    const entry = response.data.find(e => String(e.id) === String(entryId));
+
+    if (!entry) {
+      return {
+        response: {
+          success: false,
+          error: 'ENTRY_NOT_FOUND',
+          message: `Entry ${entryId} not found between ${searchStart} and ${searchEnd}. For entries outside this window, pass entry_date (YYYY-MM-DD) with the day the entry is on — list_time_entries shows it.`
+        }
+      };
+    }
+
+    return { entry };
+  }
+
+  /**
    * Update an existing time entry.
    * The API has no single-entry GET, so the entry is found by scanning a
-   * date window (31 days back to 7 days forward). The PUT re-sends the full
-   * merged body, which is safe whether the API replaces or patches.
+   * date window (31 days back to 7 days forward). The PUT replaces the entry
+   * (fields left out are cleared) and gives it a NEW id, so the full merged
+   * body is sent and the replacement is identified afterwards.
    */
   async updateTimeEntry(
     entryId: string,
@@ -682,11 +724,12 @@ export class TMetricClient {
       endTime?: string;
       taskUrl?: string;
       tags?: string[];
+      note?: string;
       entryDate?: string;
     }
   ): Promise<ApiResponse> {
     try {
-      const { taskName, projectId, startTime, endTime, taskUrl, tags, entryDate } = updates;
+      const { taskName, projectId, startTime, endTime, taskUrl, tags, note, entryDate } = updates;
 
       if (
         taskName === undefined &&
@@ -694,7 +737,8 @@ export class TMetricClient {
         startTime === undefined &&
         endTime === undefined &&
         taskUrl === undefined &&
-        tags === undefined
+        tags === undefined &&
+        note === undefined
       ) {
         return {
           success: false,
@@ -734,31 +778,11 @@ export class TMetricClient {
 
       await this.ensureInitialized();
 
-      // Find the entry: no GET-by-id in the API, so scan a date window.
-      // With entry_date, search exactly that day (works for any age).
-      const now = new Date();
-      const searchStart = entryDate ?? new Date(now.getTime() - 31 * 86400000).toISOString().split('T')[0];
-      const searchEnd = entryDate ?? new Date(now.getTime() + 7 * 86400000).toISOString().split('T')[0];
-
-      const response = await this.client.get<TMetricTimeEntry[]>(
-        `/accounts/${this.accountId}/timeentries`,
-        {
-          params: {
-            startDate: searchStart,
-            endDate: searchEnd
-          }
-        }
-      );
-
-      const entry = response.data.find(e => String(e.id) === String(entryId));
-
-      if (!entry) {
-        return {
-          success: false,
-          error: 'ENTRY_NOT_FOUND',
-          message: `Entry ${entryId} not found between ${searchStart} and ${searchEnd}. For entries outside this window, pass entry_date (YYYY-MM-DD) with the day the entry is on — list_time_entries shows it.`
-        };
+      const found = await this.findEntryById(entryId, entryDate);
+      if ('response' in found) {
+        return found.response;
       }
+      const entry = found.entry;
 
       // Merge: new values win, everything else keeps the fetched value
       const mergedStart = startTime ?? entry.startTime;
@@ -828,24 +852,68 @@ export class TMetricClient {
         }
       }
 
-      // The update schema allows note alongside task — keep it so an update
-      // never erases a note the entry already has
-      if (entry.note) {
-        updateData.note = entry.note;
+      // The PUT replaces the entry and clears any field left out. note
+      // undefined keeps the existing note; a string sets it; the exact empty
+      // string leaves it out of the body, which clears it.
+      const mergedNote = note === undefined ? entry.note : note;
+      if (mergedNote) {
+        updateData.note = mergedNote;
       }
 
-      await this.client.put(
+      const putResponse = await this.client.put(
         `/accounts/${this.accountId}/timeentries/${entryId}`,
         updateData
       );
 
+      // The PUT gives the entry a new id: identify the replacement by content
+      const projectIdMerged = updateData.project.id;
+      const isReplacement = (e: TMetricTimeEntry): boolean => {
+        if (!e || new Date(e.startTime).getTime() !== new Date(mergedStart).getTime()) return false;
+        const eEnd = e.endTime ?? null;
+        if (mergedEnd === null || eEnd === null) {
+          if (mergedEnd !== eEnd) return false;
+        } else if (new Date(eEnd).getTime() !== new Date(mergedEnd).getTime()) {
+          return false;
+        }
+        if (e.project?.id !== projectIdMerged) return false;
+        if (mergedTaskName) {
+          return e.task?.name === mergedTaskName;
+        }
+        return !e.task?.name && (e.note || undefined) === (mergedNote || undefined);
+      };
+
+      const uniqueMatch = (list: TMetricTimeEntry[]): TMetricTimeEntry | undefined => {
+        const matches = list.filter(isReplacement);
+        return matches.length === 1 ? matches[0] : undefined;
+      };
+
+      const putData: unknown = putResponse?.data;
+      let replacement = uniqueMatch(
+        Array.isArray(putData) ? putData : putData && typeof putData === 'object' ? [putData as TMetricTimeEntry] : []
+      );
+
+      if (!replacement) {
+        const day = mergedStart.slice(0, 10);
+        const dayResponse = await this.client.get<TMetricTimeEntry[]>(
+          `/accounts/${this.accountId}/timeentries`,
+          { params: { startDate: day, endDate: day } }
+        );
+        replacement = uniqueMatch(Array.isArray(dayResponse.data) ? dayResponse.data : []);
+      }
+
       const result: ApiResponse = {
         success: true,
-        entry_id: entryId,
-        task_name: mergedTaskName || entry.note || 'No description',
+        entry_id: replacement ? String(replacement.id) : null,
+        previous_entry_id: entryId,
+        task_name: mergedTaskName || mergedNote || 'No description',
+        note: mergedNote || null,
         started_at: mergedStart,
         ended_at: mergedEnd
       };
+
+      if (!replacement) {
+        result.message = 'Updated, but the new entry id could not be identified. Use list_time_entries to find it.';
+      }
 
       if (mergedEnd !== null) {
         const durationMinutes = calculateDurationMinutes(mergedStart, mergedEnd);
@@ -864,10 +932,59 @@ export class TMetricClient {
   }
 
   /**
-   * Delete a time entry
+   * Delete a time entry. With options.entryId, deletes that specific stopped
+   * entry and ignores mode; otherwise mode 'current' or 'last' applies.
    */
-  async deleteTimeEntry(mode: 'current' | 'last' = 'current'): Promise<ApiResponse> {
+  async deleteTimeEntry(
+    mode: 'current' | 'last' = 'current',
+    options?: { entryId?: string; entryDate?: string }
+  ): Promise<ApiResponse> {
     try {
+      const entryId = options?.entryId;
+      const entryDate = options?.entryDate;
+
+      if (entryId !== undefined) {
+        if (entryDate !== undefined && !DATE_PATTERN.test(entryDate)) {
+          return {
+            success: false,
+            error: 'INVALID_DATE_FORMAT',
+            message: 'entry_date must be a YYYY-MM-DD string'
+          };
+        }
+
+        await this.ensureInitialized();
+
+        const found = await this.findEntryById(entryId, entryDate);
+        if ('response' in found) {
+          return found.response;
+        }
+        const entry = found.entry;
+
+        if (entry.endTime === null) {
+          return {
+            success: false,
+            error: 'ENTRY_RUNNING',
+            message: `Entry ${entryId} is the running timer. Stop it first with stop_timer, or use mode "current" to delete the running timer.`
+          };
+        }
+
+        await this.client.delete(
+          `/accounts/${this.accountId}/timeentries/${entryId}`
+        );
+
+        const durationMinutes = calculateDurationMinutes(entry.startTime, entry.endTime);
+        return {
+          success: true,
+          deleted: entryId,
+          task_name: entry.task?.name || entry.note || 'No description',
+          note: entry.note || null,
+          started_at: entry.startTime,
+          ended_at: entry.endTime,
+          time_spent: formatMinutesToGitLab(durationMinutes),
+          time_spent_minutes: durationMinutes
+        };
+      }
+
       await this.ensureInitialized();
 
       let targetId: string | undefined;

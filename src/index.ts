@@ -124,7 +124,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'update_time_entry',
-        description: 'Update an existing time entry. Fields that are not provided keep their current values. Use list_time_entries first to find the entry ID.',
+        description: 'Update an existing time entry. Fields that are not provided keep their current values. Use list_time_entries first to find the entry ID. The entry gets a new id after every update; the response\'s entry_id is the new one (previous_entry_id is the one you passed).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -157,6 +157,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               items: { type: 'string' },
               description: 'New tag names; replaces all tags on the entry (empty array clears them). Tags must already exist in the TMetric account. Use list_tmetric_tags to see them.',
             },
+            note: {
+              type: 'string',
+              description: 'Note text. Omit to keep the current note; empty string clears it. A note shows next to the task name in TMetric.',
+            },
             entry_date: {
               type: 'string',
               description: 'Day the entry is on (YYYY-MM-DD, shown by list_time_entries). Without it, only entries from 31 days back to 7 days forward are found.',
@@ -167,7 +171,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_time_entries',
-        description: 'List time entries in a date range (inclusive), oldest first. Use this to find an entry ID before updating an entry.',
+        description: 'List time entries in a date range (inclusive), oldest first. Use this to find an entry ID before updating or deleting an entry. Each entry has note (null when none) and has_task; has_task false means a note-only entry (task_name then falls back to the note).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -193,7 +197,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'delete_time_entry',
-        description: 'Delete a time entry. Mode "current" deletes active timer only, "last" deletes most recent entry (with 5-min safety window).',
+        description: 'Delete a time entry. Mode "current" deletes active timer only, "last" deletes most recent entry (with 5-min safety window). entry_id deletes that specific stopped entry instead (mode is ignored; running entries are refused). IDs come from list_time_entries and change every time an entry is updated, so list again before deleting. entry_date searches exactly that day for older entries.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -202,6 +206,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               enum: ['current', 'last'],
               description: 'Deletion mode: "current" for active timer only, "last" for most recent entry',
               default: 'current',
+            },
+            entry_id: {
+              type: 'string',
+              description: 'ID of a specific stopped entry to delete (from list_time_entries). Overrides mode. Running entries are refused: stop them first.',
+            },
+            entry_date: {
+              type: 'string',
+              description: 'Day the entry is on (YYYY-MM-DD). Without it, only entries from 31 days back to 7 days forward are found.',
             },
           },
         },
@@ -307,7 +319,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'update_time_entry': {
-        const { entry_id, task_name, project_id, start_time, end_time, task_url, tags, entry_date } =
+        const { entry_id, task_name, project_id, start_time, end_time, task_url, tags, note, entry_date } =
           args as {
             entry_id: string;
             task_name?: string;
@@ -316,6 +328,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             end_time?: string;
             task_url?: string;
             tags?: string[];
+            note?: string;
             entry_date?: string;
           };
 
@@ -326,6 +339,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           endTime: end_time,
           taskUrl: task_url,
           tags,
+          note,
           entryDate: entry_date,
         });
 
@@ -370,8 +384,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'delete_time_entry': {
-        const { mode } = args as { mode?: 'current' | 'last' };
-        const result = await tmetricClient.deleteTimeEntry(mode);
+        const { mode, entry_id, entry_date } = args as {
+          mode?: 'current' | 'last';
+          entry_id?: string;
+          entry_date?: string;
+        };
+        const result = await tmetricClient.deleteTimeEntry(mode, {
+          entryId: entry_id,
+          entryDate: entry_date,
+        });
         return {
           content: [
             {

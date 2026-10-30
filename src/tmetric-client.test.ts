@@ -1315,6 +1315,8 @@ describe('TMetricClient', () => {
         {
           id: 'entry-1',
           task_name: 'ABC-5 Some work',
+          note: null,
+          has_task: true,
           project_name: 'Test Project',
           project_id: 123,
           start_time: '2024-01-10T09:00:00',
@@ -1327,6 +1329,8 @@ describe('TMetricClient', () => {
         {
           id: 'entry-2',
           task_name: 'Note-only entry',
+          note: 'Note-only entry',
+          has_task: false,
           project_name: 'Other Project',
           project_id: 456,
           start_time: '2024-01-12T14:00:00',
@@ -1336,6 +1340,37 @@ describe('TMetricClient', () => {
           task_url: undefined,
           tags: ['Development'],
         },
+      ]);
+    });
+
+    it('should return note and has_task for task, note-only and combined entries', async () => {
+      const entries: TMetricTimeEntry[] = [
+        {
+          id: 'a', startTime: '2024-01-10T09:00:00', endTime: '2024-01-10T10:00:00',
+          project: { id: 1, name: 'P' }, task: { name: 'Task A' },
+        },
+        {
+          id: 'b', startTime: '2024-01-10T10:00:00', endTime: '2024-01-10T11:00:00',
+          project: { id: 1, name: 'P' }, note: 'Just a note',
+        },
+        {
+          id: 'c', startTime: '2024-01-10T11:00:00', endTime: '2024-01-10T12:00:00',
+          project: { id: 1, name: 'P' }, task: { name: 'Task C' }, note: 'Context',
+        },
+      ];
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+        .query({ startDate: '2024-01-10', endDate: '2024-01-10' })
+        .reply(200, entries);
+
+      const result = await client.listTimeEntries('2024-01-10', '2024-01-10');
+      const rows = result.entries.map((e: any) => [e.task_name, e.note, e.has_task]);
+
+      expect(rows).toEqual([
+        ['Task A', null, true],
+        ['Just a note', 'Just a note', false],
+        ['Task C', 'Context', true],
       ]);
     });
 
@@ -1444,14 +1479,15 @@ describe('TMetricClient', () => {
           expect(body.project.id).toBe(123);
           return true;
         })
-        .reply(200, { ...existingEntry, task: { name: 'New name' } });
+        .reply(200, [{ ...existingEntry, id: 'entry-43', task: { name: 'New name' } }]);
 
       const result = await client.updateTimeEntry('entry-42', {
         taskName: 'New name',
       });
 
       expect(result.success).toBe(true);
-      expect(result.entry_id).toBe('entry-42');
+      expect(result.entry_id).toBe('entry-43');
+      expect(result.previous_entry_id).toBe('entry-42');
       expect(result.task_name).toBe('New name');
     });
 
@@ -1490,7 +1526,7 @@ describe('TMetricClient', () => {
           expect(body.task.name).toBe('Old name');
           return true;
         })
-        .reply(200, existingEntry);
+        .reply(200, [{ ...existingEntry, id: 'entry-43', startTime: '2024-01-10T08:00:00', endTime: '2024-01-10T09:30:00' }]);
 
       const result = await client.updateTimeEntry('entry-42', {
         startTime: '2024-01-10T08:00:00',
@@ -1613,7 +1649,7 @@ describe('TMetricClient', () => {
           expect(body.note).toBe('Extra context');
           return true;
         })
-        .reply(200, entryWithNote);
+        .reply(200, [{ ...entryWithNote, id: 'entry-43', task: { name: 'New name' } }]);
 
       const result = await client.updateTimeEntry('entry-42', {
         taskName: 'New name',
@@ -1649,7 +1685,7 @@ describe('TMetricClient', () => {
           expect(body.task.integration.type).toBe('YouTrack');
           return true;
         })
-        .reply(200, entryWithIntegration);
+        .reply(200, [{ ...entryWithIntegration, id: 'entry-43', task: { name: 'New name' } }]);
 
       const result = await client.updateTimeEntry('entry-42', {
         taskName: 'New name',
@@ -1679,7 +1715,7 @@ describe('TMetricClient', () => {
           expect(body.note).toBe('Working notes');
           return true;
         })
-        .reply(200, noteOnlyEntry);
+        .reply(200, [{ ...noteOnlyEntry, id: 'note-entry-2', task: { name: 'Working notes' } }]);
 
       const result = await client.updateTimeEntry('note-entry', {
         taskUrl: 'https://example.youtrack.cloud/issue/ABC-123',
@@ -1725,7 +1761,7 @@ describe('TMetricClient', () => {
 
       nock(TMETRIC_BASE_URL)
         .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/old-entry`)
-        .reply(200, oldEntry);
+        .reply(200, [{ ...oldEntry, id: 'old-entry-2', task: { name: 'Renamed old work' } }]);
 
       const result = await client.updateTimeEntry('old-entry', {
         taskName: 'Renamed old work',
@@ -1770,6 +1806,170 @@ describe('TMetricClient', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('INVALID_TASK_URL');
+    });
+
+    describe('note handling', () => {
+      const entryWithNote: TMetricTimeEntry = { ...existingEntry, note: 'Old note' };
+
+      const mockFind = () =>
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH_QUERY)
+          .reply(200, [entryWithNote]);
+
+      it('keeps the existing note when note is omitted', async () => {
+        mockFind();
+        nock(TMETRIC_BASE_URL)
+          .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-42`, (body) => body.note === 'Old note')
+          .reply(200, [{ ...entryWithNote, id: 'entry-43', task: { name: 'New name' } }]);
+
+        const result = await client.updateTimeEntry('entry-42', { taskName: 'New name' });
+
+        expect(result.success).toBe(true);
+        expect(result.note).toBe('Old note');
+      });
+
+      it('sends a new note when provided', async () => {
+        mockFind();
+        nock(TMETRIC_BASE_URL)
+          .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-42`, (body) => body.note === 'new text')
+          .reply(200, [{ ...entryWithNote, id: 'entry-43', note: 'new text' }]);
+
+        const result = await client.updateTimeEntry('entry-42', { note: 'new text' });
+
+        expect(result.success).toBe(true);
+        expect(result.note).toBe('new text');
+        expect(result.entry_id).toBe('entry-43');
+      });
+
+      it('leaves the note out of the body when note is an empty string', async () => {
+        mockFind();
+        nock(TMETRIC_BASE_URL)
+          .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-42`, (body) => !('note' in body))
+          .reply(200, [{ ...existingEntry, id: 'entry-43' }]);
+
+        const result = await client.updateTimeEntry('entry-42', { note: '' });
+
+        expect(result.success).toBe(true);
+        expect(result.note).toBeNull();
+        expect(result.entry_id).toBe('entry-43');
+        expect(nock.pendingMocks()).toEqual([]);
+      });
+
+      it('treats a whitespace-only note as a value', async () => {
+        mockFind();
+        nock(TMETRIC_BASE_URL)
+          .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-42`, (body) => body.note === ' ')
+          .reply(200, [{ ...entryWithNote, id: 'entry-43', note: ' ' }]);
+
+        const result = await client.updateTimeEntry('entry-42', { note: ' ' });
+
+        expect(result.success).toBe(true);
+        expect(result.note).toBe(' ');
+      });
+    });
+
+    describe('new entry id', () => {
+      const replacement = { ...existingEntry, id: 'entry-99', task: { name: 'New name' } };
+
+      const mockFindAndPut = (putReply: unknown) => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH_QUERY)
+          .reply(200, [existingEntry]);
+        nock(TMETRIC_BASE_URL)
+          .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-42`)
+          .reply(200, putReply as any);
+      };
+
+      it('picks the replacement out of a PUT response with other entries', async () => {
+        mockFindAndPut([
+          { ...existingEntry, id: 'other-1', task: { name: 'Other' } },
+          replacement,
+          { ...existingEntry, id: 'other-2', task: { name: 'Another' } },
+        ]);
+
+        const result = await client.updateTimeEntry('entry-42', { taskName: 'New name' });
+
+        expect(result.success).toBe(true);
+        expect(result.entry_id).toBe('entry-99');
+        expect(result.previous_entry_id).toBe('entry-42');
+      });
+
+      it('converts a numeric new id to a string', async () => {
+        mockFindAndPut([{ ...replacement, id: 555 }]);
+
+        const result = await client.updateTimeEntry('entry-42', { taskName: 'New name' });
+
+        expect(result.entry_id).toBe('555');
+      });
+
+      it('falls back to listing the day when the PUT response lacks the replacement', async () => {
+        mockFindAndPut([{ ...existingEntry, id: 'other-1', task: { name: 'Other' } }]);
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query({ startDate: '2024-01-10', endDate: '2024-01-10' })
+          .reply(200, [replacement]);
+
+        const result = await client.updateTimeEntry('entry-42', { taskName: 'New name' });
+
+        expect(result.success).toBe(true);
+        expect(result.entry_id).toBe('entry-99');
+        expect(nock.pendingMocks()).toEqual([]);
+      });
+
+      it('returns entry_id null with a message when nothing matches', async () => {
+        mockFindAndPut({});
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query({ startDate: '2024-01-10', endDate: '2024-01-10' })
+          .reply(200, []);
+
+        const result = await client.updateTimeEntry('entry-42', { taskName: 'New name' });
+
+        expect(result.success).toBe(true);
+        expect(result.entry_id).toBeNull();
+        expect(result.previous_entry_id).toBe('entry-42');
+        expect(result.message).toBe(
+          'Updated, but the new entry id could not be identified. Use list_time_entries to find it.'
+        );
+      });
+
+      it('returns entry_id null when several entries match', async () => {
+        mockFindAndPut([replacement, { ...replacement, id: 'entry-100' }]);
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query({ startDate: '2024-01-10', endDate: '2024-01-10' })
+          .reply(200, [replacement, { ...replacement, id: 'entry-100' }]);
+
+        const result = await client.updateTimeEntry('entry-42', { taskName: 'New name' });
+
+        expect(result.entry_id).toBeNull();
+        expect(result.message).toContain('could not be identified');
+      });
+
+      it('identifies a running entry (null endTime) and a note-only entry', async () => {
+        const running: TMetricTimeEntry = {
+          id: 'run-1',
+          startTime: '2024-01-10T09:00:00',
+          endTime: null,
+          project: { id: 123, name: 'Test Project' },
+          note: 'Just a note',
+        };
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH_QUERY)
+          .reply(200, [running]);
+        nock(TMETRIC_BASE_URL)
+          .put(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/run-1`)
+          .reply(200, [{ ...running, id: 'run-2', note: 'Changed' }]);
+
+        const result = await client.updateTimeEntry('run-1', { note: 'Changed' });
+
+        expect(result.entry_id).toBe('run-2');
+        expect(result.ended_at).toBeNull();
+        expect(result.task_name).toBe('Changed');
+      });
     });
 
     it('should reject when no updates are given', async () => {
@@ -1870,6 +2070,156 @@ describe('TMetricClient', () => {
         expect(result.success).toBe(false);
         expect(result.error).toBe('NO_TIMER_RUNNING');
         expect(result.message).toBe('No active timer to delete');
+      });
+    });
+
+    describe('entry_id mode', () => {
+      const SEARCH = { startDate: '2023-12-15', endDate: '2024-01-22' };
+      const stopped: TMetricTimeEntry = {
+        id: 'entry-7',
+        startTime: '2024-01-10T09:00:00',
+        endTime: '2024-01-10T10:30:00',
+        project: { id: 123, name: 'Test' },
+        task: { name: 'Some task' },
+        note: 'Some note',
+      };
+
+      it('deletes a stopped entry found in the default window', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH)
+          .reply(200, [stopped]);
+        const del = nock(TMETRIC_BASE_URL)
+          .delete(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-7`)
+          .reply(200);
+
+        const result = await client.deleteTimeEntry('current', { entryId: 'entry-7' });
+
+        expect(del.isDone()).toBe(true);
+        expect(result).toEqual({
+          success: true,
+          deleted: 'entry-7',
+          task_name: 'Some task',
+          note: 'Some note',
+          started_at: '2024-01-10T09:00:00',
+          ended_at: '2024-01-10T10:30:00',
+          time_spent: '1h30m',
+          time_spent_minutes: 90,
+        });
+      });
+
+      it('reports a note-only entry using the note as task name', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH)
+          .reply(200, [{ ...stopped, task: undefined }]);
+        nock(TMETRIC_BASE_URL)
+          .delete(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-7`)
+          .reply(200);
+
+        const result = await client.deleteTimeEntry('current', { entryId: 'entry-7' });
+
+        expect(result.task_name).toBe('Some note');
+        expect(result.note).toBe('Some note');
+      });
+
+      it('uses exactly entry_date when given', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query({ startDate: '2023-11-20', endDate: '2023-11-20' })
+          .reply(200, [{ ...stopped, startTime: '2023-11-20T09:00:00', endTime: '2023-11-20T10:00:00', note: undefined }]);
+        nock(TMETRIC_BASE_URL)
+          .delete(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-7`)
+          .reply(200);
+
+        const result = await client.deleteTimeEntry('current', { entryId: 'entry-7', entryDate: '2023-11-20' });
+
+        expect(result.success).toBe(true);
+        expect(result.note).toBeNull();
+        expect(result.time_spent_minutes).toBe(60);
+      });
+
+      it('matches a numeric API id against a string entry_id', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH)
+          .reply(200, [{ ...stopped, id: 220750176 }]);
+        nock(TMETRIC_BASE_URL)
+          .delete(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/220750176`)
+          .reply(200);
+
+        const result = await client.deleteTimeEntry('current', { entryId: '220750176' });
+
+        expect(result.success).toBe(true);
+        expect(result.deleted).toBe('220750176');
+      });
+
+      it('refuses to delete a running entry and makes no DELETE call', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH)
+          .reply(200, [{ ...stopped, endTime: null }]);
+        const del = nock(TMETRIC_BASE_URL)
+          .delete(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-7`)
+          .reply(200);
+
+        const result = await client.deleteTimeEntry('current', { entryId: 'entry-7' });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('ENTRY_RUNNING');
+        expect(result.message).toContain('stop_timer');
+        expect(del.isDone()).toBe(false);
+      });
+
+      it('returns ENTRY_NOT_FOUND when the id is not in the window', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH)
+          .reply(200, [stopped]);
+
+        const result = await client.deleteTimeEntry('current', { entryId: 'missing' });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('ENTRY_NOT_FOUND');
+      });
+
+      it('rejects an entry_date that is not YYYY-MM-DD', async () => {
+        const result = await client.deleteTimeEntry('current', { entryId: 'entry-7', entryDate: '20/11/2023' });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('INVALID_DATE_FORMAT');
+      });
+
+      it('ignores mode when entry_id is given', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH)
+          .reply(200, [stopped]);
+        nock(TMETRIC_BASE_URL)
+          .delete(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-7`)
+          .reply(200);
+
+        // mode 'last' would otherwise refuse (entry is old) and query today only
+        const result = await client.deleteTimeEntry('last', { entryId: 'entry-7' });
+
+        expect(result.success).toBe(true);
+        expect(result.deleted).toBe('entry-7');
+      });
+
+      it('returns API_ERROR when the DELETE fails', async () => {
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query(SEARCH)
+          .reply(200, [stopped]);
+        nock(TMETRIC_BASE_URL)
+          .delete(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/entry-7`)
+          .reply(500, { error: 'boom' });
+
+        const result = await client.deleteTimeEntry('current', { entryId: 'entry-7' });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('API_ERROR');
+        expect(result.message).toContain('Failed to delete entry');
       });
     });
 

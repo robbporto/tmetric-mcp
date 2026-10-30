@@ -150,20 +150,31 @@ timer.
 
 ### list_time_entries(start_date, end_date)
 List entries between two `YYYY-MM-DD` dates (inclusive), oldest first. Returns
-each entry's ID, task name, project, times, duration and tags. Use it to find
-an entry ID before updating.
+each entry's ID, task name, `note` (null when there is none), `has_task`
+(false means a note-only entry, whose `task_name` falls back to the note),
+project, times, duration and tags. Use it to find an entry ID before updating
+or deleting.
 
-### update_time_entry(entry_id, task_name?, project_id?, start_time?, end_time?, task_url?, tags?, entry_date?)
+### update_time_entry(entry_id, task_name?, project_id?, start_time?, end_time?, task_url?, tags?, note?, entry_date?)
 Change an existing entry. Fields you leave out keep their current values;
-`tags` replaces all tags on the entry (an empty array clears them). Entries are
+`tags` replaces all tags on the entry (an empty array clears them). `note` sets the entry's note; leave it out to
+keep the current note, or pass an empty string to clear it. TMetric gives an
+entry a **new ID** after every update; the response's `entry_id` is the new one
+(`previous_entry_id` is the one you passed). Entries are
 found within a window of 31 days back to 7 days forward from today — for
 anything older, pass `entry_date` (the entry's day, shown by
 `list_time_entries`).
 
-### delete_time_entry(mode?)
+### delete_time_entry(mode?, entry_id?, entry_date?)
 Delete a time entry. Mode `"current"` (default) deletes only the running
 timer. Mode `"last"` deletes today's most recent entry, but refuses if it was
 stopped more than 5 minutes ago.
+
+With `entry_id`, mode is ignored and that specific stopped entry is deleted;
+the response reports its task name, note, start, end and duration. A running
+entry is refused (stop it first). IDs come from `list_time_entries` and change
+whenever an entry is updated, so list again before deleting. Entries are found
+within 31 days back to 7 days forward; for older ones pass `entry_date`.
 
 ### Time and date formats
 

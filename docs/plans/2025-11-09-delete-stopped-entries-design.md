@@ -236,3 +236,7 @@ case "delete_time_entry": {
 - [ ] Add tests for all scenarios
 - [ ] Update README documentation
 - [ ] Update CLAUDE.md with new behavior
+
+## Update 2026-10-30
+
+Delete by `entry_id` (with optional `entry_date`) was added to `delete_time_entry` at the user's request, superseding the earlier decision that specific-entry management belongs in the TMetric web UI. Running entries are refused with `ENTRY_RUNNING`. The 5-minute rule still applies to mode `"last"`.
