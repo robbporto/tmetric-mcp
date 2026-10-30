@@ -894,11 +894,16 @@ export class TMetricClient {
 
       if (!replacement) {
         const day = mergedStart.slice(0, 10);
-        const dayResponse = await this.client.get<TMetricTimeEntry[]>(
-          `/accounts/${this.accountId}/timeentries`,
-          { params: { startDate: day, endDate: day } }
-        );
-        replacement = uniqueMatch(Array.isArray(dayResponse.data) ? dayResponse.data : []);
+        // The PUT already succeeded: a failure here must not be reported as a failed update
+        try {
+          const dayResponse = await this.client.get<TMetricTimeEntry[]>(
+            `/accounts/${this.accountId}/timeentries`,
+            { params: { startDate: day, endDate: day } }
+          );
+          replacement = uniqueMatch(Array.isArray(dayResponse.data) ? dayResponse.data : []);
+        } catch {
+          replacement = undefined;
+        }
       }
 
       const result: ApiResponse = {
@@ -960,7 +965,7 @@ export class TMetricClient {
         }
         const entry = found.entry;
 
-        if (entry.endTime === null) {
+        if (entry.endTime == null) {
           return {
             success: false,
             error: 'ENTRY_RUNNING',

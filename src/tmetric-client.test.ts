@@ -1935,6 +1935,21 @@ describe('TMetricClient', () => {
         );
       });
 
+      it('still reports success when the fallback day lookup fails after the PUT', async () => {
+        mockFindAndPut([{ ...existingEntry, id: 'other-1', task: { name: 'Other' } }]);
+        nock(TMETRIC_BASE_URL)
+          .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries`)
+          .query({ startDate: '2024-01-10', endDate: '2024-01-10' })
+          .reply(500, { error: 'boom' });
+
+        const result = await client.updateTimeEntry('entry-42', { taskName: 'New name' });
+
+        expect(result.success).toBe(true);
+        expect(result.entry_id).toBeNull();
+        expect(result.previous_entry_id).toBe('entry-42');
+        expect(result.message).toContain('could not be identified');
+      });
+
       it('returns entry_id null when several entries match', async () => {
         mockFindAndPut([replacement, { ...replacement, id: 'entry-100' }]);
         nock(TMETRIC_BASE_URL)
