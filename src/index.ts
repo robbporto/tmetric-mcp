@@ -45,6 +45,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'list_tmetric_tags',
+        description: 'Get list of available TMetric tags (names usable in the tags parameter of start_timer, create_time_entry and update_time_entry). Work-type tags are marked; an entry can have at most one.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
         name: 'get_current_timer',
         description: 'Check if a timer is currently running and get its details',
         inputSchema: {
@@ -73,7 +81,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             tags: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Optional tag names. Tags must already exist in the TMetric account.',
+              description: 'Optional tag names. Tags must already exist in the TMetric account. Use list_tmetric_tags to see them.',
             },
           },
           required: ['project_id', 'task_name'],
@@ -108,7 +116,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             tags: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Optional tag names. Tags must already exist in the TMetric account.',
+              description: 'Optional tag names. Tags must already exist in the TMetric account. Use list_tmetric_tags to see them.',
             },
           },
           required: ['project_id', 'task_name', 'start_time', 'end_time'],
@@ -147,7 +155,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             tags: {
               type: 'array',
               items: { type: 'string' },
-              description: 'New tag names; replaces all tags on the entry (empty array clears them). Tags must already exist in the TMetric account.',
+              description: 'New tag names; replaces all tags on the entry (empty array clears them). Tags must already exist in the TMetric account. Use list_tmetric_tags to see them.',
             },
             entry_date: {
               type: 'string',
@@ -210,6 +218,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case 'list_tmetric_projects': {
         const result = await tmetricClient.listProjects();
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'list_tmetric_tags': {
+        const result = await tmetricClient.listTags();
         return {
           content: [
             {

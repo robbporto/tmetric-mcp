@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import nock from 'nock';
 import { TMetricClient } from './tmetric-client.js';
-import type { TMetricUser, TMetricProject, TMetricTimeEntry } from './types.js';
+import type { TMetricUser, TMetricProject, TMetricTimeEntry, TMetricTag } from './types.js';
 
 const TMETRIC_BASE_URL = 'https://app.tmetric.com';
 const API_TOKEN = 'test-api-token';
@@ -65,6 +65,84 @@ describe('TMetricClient', () => {
       await expect(client.initialize()).rejects.toThrow(
         'Failed to initialize TMetric client'
       );
+    });
+  });
+
+  describe('listTags', () => {
+    beforeEach(async () => {
+      nock(TMETRIC_BASE_URL)
+        .get('/api/v3/user')
+        .reply(200, { activeAccountId: ACCOUNT_ID });
+
+      await client.initialize();
+    });
+
+    it('should return tags mapped and sorted by name case-insensitively', async () => {
+      const mockTags: TMetricTag[] = [
+        { id: 3, name: 'review', isWorkType: false },
+        { id: 1, name: 'Development', isWorkType: true },
+        { id: 2, name: 'bugfix', isWorkType: false },
+      ];
+
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, mockTags);
+
+      const result = await client.listTags();
+
+      expect(result.success).toBe(true);
+      expect(result.tags).toEqual([
+        { id: 2, name: 'bugfix', is_work_type: false },
+        { id: 1, name: 'Development', is_work_type: true },
+        { id: 3, name: 'review', is_work_type: false },
+      ]);
+    });
+
+    it('should default is_work_type to false when isWorkType is missing', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, [{ id: 1, name: 'plain' }]);
+
+      const result = await client.listTags();
+
+      expect(result.tags).toEqual([{ id: 1, name: 'plain', is_work_type: false }]);
+    });
+
+    it('should drop tags with no name', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, [
+          { id: 1, name: '' },
+          { id: 2 },
+          { id: 3, name: 'kept', isWorkType: false },
+        ]);
+
+      const result = await client.listTags();
+
+      expect(result.tags).toEqual([{ id: 3, name: 'kept', is_work_type: false }]);
+    });
+
+    it('should return empty array when no tags', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(200, []);
+
+      const result = await client.listTags();
+
+      expect(result.success).toBe(true);
+      expect(result.tags).toEqual([]);
+    });
+
+    it('should handle API errors gracefully', async () => {
+      nock(TMETRIC_BASE_URL)
+        .get(`/api/v3/accounts/${ACCOUNT_ID}/timeentries/tags`)
+        .reply(500, { error: 'Internal Server Error' });
+
+      const result = await client.listTags();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('API_ERROR');
+      expect(result.message).toContain('Failed to list tags');
     });
   });
 

@@ -69,6 +69,7 @@ Model Context Protocol (MCP) server that integrates TMetric time tracking with C
 ## MCP Tools Exposed
 
 - `list_tmetric_projects` — projects available for time tracking
+- `list_tmetric_tags` — tags available for the `tags` parameter, with `is_work_type` flags
 - `get_current_timer` — whether a timer is running, plus its details
 - `start_timer(project_id, task_name, task_url?, tags?)` — if a timer is already running it is stopped on the same timestamp the new one starts (reported as `switched_from`); `task_url` may be a GitLab, GitHub or YouTrack issue URL
 - `stop_timer` — stops the active timer, returns time spent in GitLab format

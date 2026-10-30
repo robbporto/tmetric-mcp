@@ -240,6 +240,36 @@ export class TMetricClient {
   }
 
   /**
+   * List the account's tags (names usable in the tags parameter of timer tools)
+   */
+  async listTags(): Promise<ApiResponse> {
+    try {
+      await this.ensureInitialized();
+
+      const response = await this.client.get<TMetricTag[]>(
+        `/accounts/${this.accountId}/timeentries/tags`
+      );
+
+      const tags = response.data
+        .filter((t): t is TMetricTag & { name: string } => !!t.name)
+        .map(t => ({
+          id: t.id,
+          name: t.name,
+          is_work_type: t.isWorkType ?? false
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+      return { success: true, tags };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: 'API_ERROR',
+        message: `Failed to list tags: ${error.message}`
+      };
+    }
+  }
+
+  /**
    * Get active time entry (full object) from today's entries
    */
   private async getActiveTimeEntry(): Promise<TMetricTimeEntry | null> {

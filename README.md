@@ -126,6 +126,10 @@ When prompted, configure:
 ### list_tmetric_projects()
 Get list of available projects.
 
+### list_tmetric_tags()
+Get list of available tags (names usable in the `tags` parameter). Work-type
+tags are marked; an entry can have at most one.
+
 ### get_current_timer()
 Check if a timer is running.
 
